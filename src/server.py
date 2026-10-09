@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / "app"
 CACHE_DIR = ROOT / "data" / "cache"
 MAX_HOURS = 168
+MAX_CACHED_PLANS = 64
 
 
 class ScreeningError(ValueError):
@@ -59,6 +60,7 @@ class Screener:
         self.lock = threading.Lock()
         self.objects = {}            # dataset -> (mtime, objs, sats, validity) for manoeuvre planning and red zones
         self.objects_lock = threading.Lock()
+        self.plans = {}              # request -> manoeuvre plans (JSON bytes), oldest dropped first
 
     def loaded(self, dataset, path):
         """(objs, sats, validity) of a dataset, reloaded when its leo_objects.json changes."""
@@ -79,11 +81,17 @@ class Screener:
         except (KeyError, ValueError):
             raise ScreeningError("Use n1=<NORAD>&n2=<NORAD>&tca_ms=<ms>&not_before_ms=<ms>.") from None
         objs, sats, valid = self.loaded(dataset, path)
-        try:
-            result = maneuver.plan_conjunction(objs, sats, valid, n1, n2, tca_ms, not_before_ms)
-        except ValueError as err:
-            raise ScreeningError(str(err)) from None
-        return json.dumps(result).encode()
+        # Plans are requested each time a conjunction is analysed, so keep the latest ones.
+        key = (dataset, path.stat().st_mtime, n1, n2, tca_ms, not_before_ms)
+        if key not in self.plans:
+            try:
+                result = maneuver.plan_conjunction(objs, sats, valid, n1, n2, tca_ms, not_before_ms)
+            except ValueError as err:
+                raise ScreeningError(str(err)) from None
+            if len(self.plans) >= MAX_CACHED_PLANS:
+                self.plans.pop(next(iter(self.plans)))
+            self.plans[key] = json.dumps(result).encode()
+        return self.plans[key]
 
     @staticmethod
     def meta(dataset):

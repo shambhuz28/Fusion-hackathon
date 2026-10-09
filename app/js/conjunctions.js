@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
 import { DATASET, dataUrl, makeSatrec } from './data.js';
-import { createManeuverView } from './maneuverView.js';
+import { canManoeuvre, createManeuverView } from './maneuverView.js';
 import { SCENE_UNITS_PER_KM } from './config.js';
 
 const sat = window.satellite;
@@ -362,6 +362,9 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
   function analyze(e, focus = true) {
     if (!maneuver.forEvent(e)) maneuver.clear();
     active = e;
+    // Avoidance applies only when a satellite is involved: debris and rocket bodies cannot manoeuvre.
+    const movable = [e.norad_1, e.norad_2].some((norad) => canManoeuvre(satByNorad.get(norad)));
+    $('conjManeuver').style.display = movable ? '' : 'none';
     recA = makeSatrec(satByNorad.get(e.norad_1));
     recB = makeSatrec(satByNorad.get(e.norad_2));
     const tca = new Date(e.tca_ms);
@@ -387,6 +390,8 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
     $('conjZone').innerHTML = e.zone ? zoneHtml(e) : '';
     lastIds = '';
     onAnalyze();
+    // A collision that might happen gets its avoidance path straight away.
+    if (movable && e.risk !== 'green') maneuver.request(e, false);
   }
 
   function zoneHtml(e) {
@@ -480,6 +485,7 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
     }
     updateZones(now);
     if (!active) return;
+    maneuver.update();
 
     // Pause exactly at TCA when the clock runs through it (the manoeuvred TCA while a plan is flown).
     const tcaMs = maneuver.summary()?.tca_after_ms ?? active.tca_ms;
@@ -489,14 +495,17 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
     }
 
     const date = new Date(state.simTime);
-    let pa = sat.propagate(recA, date)?.position, pb = sat.propagate(recB, date)?.position;
-    if (!pa || !pb) return;
-    // While a suggested manoeuvre is flown, the manoeuvring satellite follows its new path.
+    const sa = sat.propagate(recA, date), sb = sat.propagate(recB, date);
+    if (!sa?.position || !sb?.position) return;
+    // While a suggested manoeuvre is flown, the manoeuvring satellite follows its new path. The markers
+    // use the path as drawn (its distance from the orbit may be enlarged); the distance shown is the true one.
     const shift = (p, o) => (o ? { x: p.x + o[0], y: p.y + o[1], z: p.z + o[2] } : p);
-    pa = shift(pa, maneuver.offset(active.norad_1, state.simTime));
-    pb = shift(pb, maneuver.offset(active.norad_2, state.simTime));
-    toScene(pa.x, pa.y, pa.z, markerA.position);
-    toScene(pb.x, pb.y, pb.z, markerB.position);
+    const pa = shift(sa.position, maneuver.offset(active.norad_1, state.simTime));
+    const pb = shift(sb.position, maneuver.offset(active.norad_2, state.simTime));
+    const da = shift(sa.position, maneuver.drawnOffset(active.norad_1, state.simTime, sa));
+    const db = shift(sb.position, maneuver.drawnOffset(active.norad_2, state.simTime, sb));
+    toScene(da.x, da.y, da.z, markerA.position);
+    toScene(db.x, db.y, db.z, markerB.position);
     sepGeometry.attributes.position.setXYZ(0, markerA.position.x, markerA.position.y, markerA.position.z);
     sepGeometry.attributes.position.setXYZ(1, markerB.position.x, markerB.position.y, markerB.position.z);
     sepGeometry.attributes.position.needsUpdate = true;

@@ -140,6 +140,30 @@ the 100 km radius and the one-orbit window are chosen values, and a predicted cl
 .venv/bin/python src/screen_conjunctions.py --zones-only   # redo only the zones of the existing app file (~20 s)
 ```
 
+### Avoidance manoeuvres (satellite vs satellite, satellite vs debris)
+
+When a critical or watch conjunction with at least one satellite is analysed, `src/maneuver.py` plans a
+temporary detour for it (served by `src/server.py`, `/api/maneuver`). Debris and rocket bodies cannot
+manoeuvre, so debris-debris events get no plan: they stay red zones (above).
+
+- **Who moves:** each object of the pair that can manoeuvre is planned; the one needing less Δv is recommended.
+- **Physics:** the detour is the SGP4 path plus an offset propagated with the Clohessy-Wiltshire (Hill)
+  equations in the satellite's radial / along-track / cross-track frame. Burns are impulsive.
+- **Minimum fuel:** the avoidance burn is the smallest one that gives miss ≥ 1 km and Pc ≤ 1e-6. The offset at
+  TCA is linear in the burn, so the cheapest burn that shifts the satellite to a given point of the encounter
+  plane is the pseudo-inverse solution; the planner takes the cheapest of these over the edge of the unsafe
+  region, for burn times from 0.1 to 2 orbits before TCA in steps of 0.05, and sizes it by bisection.
+- **Return:** one or two burns after the encounter put the satellite back on its original orbit (same
+  semi-major axis, no radial or cross-track offset), a few km ahead of or behind its original position.
+- **Safety:** the whole detour is checked against every object in its altitude band; a plan that creates a new
+  approach under 2 km is dropped and the next cheapest is tried.
+- **Propellant:** rocket equation for an assumed 500 kg satellite with I<sub>sp</sub> 220 s (TLEs give neither).
+
+In the simulation the detour is a dashed green line from the avoidance burn until it rejoins the original
+orbit, with a marker at each burn. It leaves the orbit by a few km at most, so its radial and cross-track
+distance from the orbit is drawn enlarged (the factor is shown, and can be switched off); every number in
+the card is the true value.
+
 ### 7-day look-ahead
 
 The default window is 7 days (`--hours 168`), split into day-long segments screened in parallel (`--workers`).
@@ -160,6 +184,7 @@ milliseconds (satellite.js parses them with a JavaScript Date) with the mean ano
 ```bash
 .venv/bin/python tests/verify_conjunctions.py      # ~1 min, 8 checks
 .venv/bin/python tests/verify_browser_sgp4.py      # browser SGP4 vs Python, needs Node.js
+.venv/bin/python tests/verify_maneuver.py          # ~2 min: plans re-flown with two-body integration, 5 checks
 ```
 
 Last results:
