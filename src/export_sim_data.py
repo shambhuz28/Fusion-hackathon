@@ -29,6 +29,8 @@ from pathlib import Path
 import _venv  # noqa: F401  (re-runs with .venv/bin/python if packages are missing)
 from fetch_positions import check_gp_csv, load_records, orbit_class
 
+import telemetry
+
 OUT_PATH = Path(__file__).resolve().parent.parent / "app" / "data" / "leo_objects.json"
 
 OMM_FIELDS = [
@@ -115,7 +117,11 @@ def main():
     OUT_PATH.write_text(json.dumps(payload, separators=(",", ":")))
     n_debris = sum(1 for row in out if row[0] == "Debris")
     print(f"Wrote {len(out)} LEO objects ({len(out) - n_debris} satellites, {n_debris} debris) to {OUT_PATH}")
+    telemetry.info("Exported {objects} LEO objects: {satellites} satellites, {debris} debris", objects=len(out),
+                   satellites=len(out) - n_debris, debris=n_debris, parsed=len(records), sources=payload["sources"])
 
 
 if __name__ == "__main__":
-    main()
+    telemetry.configure("export-sim-data")
+    with telemetry.span("Export simulation data"):
+        main()

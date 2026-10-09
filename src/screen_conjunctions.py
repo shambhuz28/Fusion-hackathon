@@ -20,15 +20,24 @@ cannot predict, so later predictions of their relative phasing are spurious (in 
 sub-1 km events grew from ~900 on day 1 to ~9,500 on day 6, while all other pairings stayed flat).
 They stay in the CSV (flag intra_constellation) but are left out of the counts and the app file.
 
+Critical debris-debris conjunctions become "red zones": neither object can manoeuvre, and a
+collision would scatter fragments that all return through the collision point once per orbit.
+For each one, the active satellites that pass within ZONE_RADIUS_KM of that point during the
+following orbit are listed as exposed (see debris_zones).
+
 Outputs:
   data/conjunctions_latest.csv (+ timestamped copy): every event under --screen-km
-  app/data/conjunctions.json: red and yellow events, plus every event involving debris
+  app/data/conjunctions.json: red and yellow events, plus every event involving debris,
+                              plus the debris-debris red zones
 
 The window is split into day-long segments screened in parallel worker processes.
+With Logfire credentials (see src/telemetry.py) each run is traced: one span per segment
+with its coarse-screen and refinement timings, plus CPU and memory metrics.
 
 Usage:
     python src/screen_conjunctions.py                     # 7 days from now
     python src/screen_conjunctions.py --hours 24 --screen-km 2
+    python src/screen_conjunctions.py --zones-only        # redo only the red zones of the existing app file
 """
 
 import argparse
@@ -46,6 +55,8 @@ from scipy.spatial import cKDTree
 from fetch_positions import ecef_to_geodetic
 from sgp4 import omm
 from sgp4.api import Satrec, SatrecArray, jday
+
+import telemetry
 
 ROOT = Path(__file__).resolve().parent.parent
 OBJECTS_PATH = ROOT / "app" / "data" / "leo_objects.json"
@@ -70,6 +81,10 @@ INTRA_CUTOFF_HOURS = 24
 
 PC_RED = 1e-4
 PC_YELLOW = 1e-5
+
+ZONE_RADIUS_KM = 100.0        # red zone around the collision point of a critical debris-debris conjunction
+ZONE_STEP_S = 10.0
+ZONE_MAX_LISTED = 50          # exposed satellites written per zone (closest first); the count is always exact
 
 
 def load_objects():
@@ -224,18 +239,126 @@ def risk_level(pc, miss_km):
     return "green"
 
 
+def debris_zones(events, objs, sats, t0):
+    """Red zones for the critical debris-debris events in `events`.
+
+    Returns one dict per zone: the event's key (tca_ms, norad_1, norad_2), the exposure window, and
+    the active satellites passing within ZONE_RADIUS_KM of the collision point (midpoint of the two
+    objects at TCA) between TCA and one orbital period later, as [norad_id, closest_km, time_ms].
+    """
+    jd0, fr0 = jday(t0.year, t0.month, t0.day, t0.hour, t0.minute, t0.second)
+    t0_ms = int(t0.timestamp() * 1000)
+    index = {o["norad_id"]: k for k, o in enumerate(objs)}
+    active = np.array([k for k, o in enumerate(objs) if o["group"] != "Debris"])
+    earth = sats[0].radiusearthkm
+    perigee = np.array([(1 + sats[k].altp) * earth for k in active])
+    apogee = np.array([(1 + sats[k].alta) * earth for k in active])
+
+    zones = []
+    for e in events:
+        a, b = index.get(e["norad_1"]), index.get(e["norad_2"])
+        if e["risk"] != "red" or a is None or b is None or not objs[a]["group"] == objs[b]["group"] == "Debris":
+            continue
+        tca = (e["tca_ms"] - t0_ms) / 1000.0
+        err_a, ra, _ = sgp4_at(sats[a], jd0, fr0, tca)
+        err_b, rb, _ = sgp4_at(sats[b], jd0, fr0, tca)
+        if err_a or err_b:
+            continue
+        point = (ra + rb) / 2
+        window_s = 2 * math.pi / min(sats[a].no_kozai, sats[b].no_kozai) * 60.0   # the longer of the two periods
+
+        # Only satellites whose altitude range reaches the zone can pass through it (30 km slack
+        # for the difference between mean and osculating radius).
+        reach = ZONE_RADIUS_KM + 30.0
+        radius = np.linalg.norm(point)
+        near = active[(perigee - reach <= radius) & (apogee + reach >= radius)]
+        closest = np.full(len(near), np.inf)
+        when = np.zeros(len(near))
+        if len(near):
+            sat_array = SatrecArray([sats[k] for k in near])
+            secs = tca + np.arange(0.0, window_s + ZONE_STEP_S, ZONE_STEP_S)
+            for start in range(0, len(secs), CHUNK_STEPS):
+                chunk = secs[start:start + CHUNK_STEPS]
+                err, r, v = sat_array.sgp4(np.full(len(chunk), jd0), fr0 + chunk / 86400.0)
+                dr = r - point
+                # Closest point to the zone centre on the straight line through each sample.
+                tau = np.clip(-np.einsum("nkx,nkx->nk", dr, v) / np.einsum("nkx,nkx->nk", v, v),
+                              -ZONE_STEP_S / 2, ZONE_STEP_S / 2)
+                dist = np.linalg.norm(dr + v * tau[..., None], axis=2)
+                dist[err != 0] = np.inf
+                k_min = np.argmin(dist, axis=1)
+                rows = np.arange(len(near))
+                better = dist[rows, k_min] < closest
+                closest[better] = dist[rows, k_min][better]
+                when[better] = (chunk[k_min] + tau[rows, k_min])[better]
+        inside = np.flatnonzero(closest < ZONE_RADIUS_KM)
+        inside = inside[np.argsort(closest[inside])]
+        zones.append({
+            "tca_ms": e["tca_ms"], "norad_1": e["norad_1"], "norad_2": e["norad_2"],
+            "window_min": round(window_s / 60, 1),
+            "n_satellites": int(len(inside)),
+            "satellites": [[objs[near[n]]["norad_id"], round(float(closest[n]), 1), t0_ms + int(round(when[n] * 1000))]
+                           for n in inside[:ZONE_MAX_LISTED]],
+        })
+    return zones
+
+
+def zones_payload(events, objs, sats, t0):
+    with telemetry.span("Debris-debris red zones") as span:
+        zones = debris_zones(events, objs, sats, t0)
+        exposed = sum(1 for z in zones if z["n_satellites"])
+        span.set_attribute("zones", len(zones))
+        span.set_attribute("zones_with_exposed_satellites", exposed)
+    print(f"{len(zones)} debris-debris red zones, {exposed} with active satellites passing within {ZONE_RADIUS_KM:g} km")
+    return {"radius_km": ZONE_RADIUS_KM, "zones": zones}
+
+
+def update_zones_only():
+    """Recompute the red zones of the existing app file from its own events, without re-screening."""
+    data = json.loads(APP_OUT.read_text())
+    t0 = datetime.fromisoformat(data["window_start_utc"].replace("Z", "+00:00"))
+    events = [dict(zip(data["fields"], row)) for row in data["rows"]]
+    objs, sats = load_objects()
+    data["debris_zones"] = zones_payload(events, objs, sats, t0)
+    APP_OUT.write_text(json.dumps(data, separators=(",", ":")))
+    print(f"Updated {APP_OUT.relative_to(ROOT)}")
+
+
 _WORKER = {}
+
+
+def init_worker(t0, args, trace):
+    """Runs once in each worker process. Forked workers inherit the parsed objects; on platforms
+    without fork (Windows) the worker starts empty and loads them itself."""
+    if "sats" not in _WORKER:
+        objs, sats = load_objects()
+        _WORKER.update(objs=objs, sats=sats, t0=t0, args=args)
+    _WORKER["trace"] = trace
+    telemetry.configure("screen-conjunctions")
 
 
 def screen_segment(segment):
     """Screen grid steps [k_start, k_end) and return refined events (runs in a worker process)."""
+    hours = [round(k * _WORKER["args"].step / 3600, 1) for k in segment]
+    with telemetry.attach_context(_WORKER.get("trace")):
+        with telemetry.span("Screen hours {from_h}-{to_h}", from_h=hours[0], to_h=hours[1]) as span:
+            events = segment_events(segment, span)
+    telemetry.flush()
+    return events
+
+
+def segment_events(segment, span):
     objs, sats, t0, args = _WORKER["objs"], _WORKER["sats"], _WORKER["t0"], _WORKER["args"]
     jd0, fr0 = jday(t0.year, t0.month, t0.day, t0.hour, t0.minute, t0.second)
-    i, j, t, d = coarse_screen(sats, jd0, fr0, *segment, args.step)
+    with telemetry.span("Coarse screen: SGP4 grid and KD-tree"):
+        i, j, t, d = coarse_screen(sats, jd0, fr0, *segment, args.step)
     # The straight-line estimate is within ~1 km of the exact miss, so far candidates can be skipped.
     near = d < args.screen_km + 3
     candidates = dedupe(i[near], j[near], t[near], d[near], args.step)
+    span.set_attribute("coarse_candidates", len(i))
+    span.set_attribute("refined_candidates", len(candidates))
 
+    refine_started = time.time()
     events = []
     for a, b, tc, _ in candidates:
         res = refine(sats[a], sats[b], jd0, fr0, float(tc))
@@ -272,6 +395,9 @@ def screen_segment(segment):
             "debris": "Debris" in (oa["group"], ob["group"]),
             "intra_constellation": oa["group"] == ob["group"] and oa["group"] in MANAGED_CONSTELLATIONS,
         })
+    span.set_attribute("events", len(events))
+    span.set_attribute("red_events", sum(1 for e in events if e["risk"] == "red"))
+    span.set_attribute("refine_seconds", round(time.time() - refine_started, 1))
     return events
 
 
@@ -283,7 +409,11 @@ def main():
     parser.add_argument("--screen-km", type=float, default=5, help="keep events with miss distance below this (default 5)")
     parser.add_argument("--hbr-m", type=float, default=20, help="combined hard-body radius in metres (default 20)")
     parser.add_argument("--start", help="window start, ISO 8601 UTC (default: now)")
+    parser.add_argument("--zones-only", action="store_true",
+                        help="only recompute the debris-debris red zones of the existing app/data/conjunctions.json")
     args = parser.parse_args()
+    if args.zones_only:
+        return update_zones_only()
 
     started = time.time()
     t0 = (datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start
@@ -296,13 +426,21 @@ def main():
     print(f"Screening {len(sats)} objects, {args.hours:g} h from {t0.isoformat()} in {args.step:g} s steps, "
           f"{len(segments)} segment(s) on {min(args.workers, len(segments))} worker(s)")
 
-    # Workers are forked after these globals are set, so each one inherits the parsed objects.
+    # Workers forked after these globals are set inherit the parsed objects (see init_worker).
     _WORKER.update(objs=objs, sats=sats, t0=t0, args=args)
-    with mp.get_context("fork").Pool(min(args.workers, len(segments))) as pool:
+    start_method = "fork" if "fork" in mp.get_all_start_methods() else "spawn"
+    n_workers = min(args.workers, len(segments))
+    telemetry.info("Screening {objects} objects for {hours} h on {workers} workers", objects=len(sats),
+                   hours=args.hours, workers=n_workers, segments=len(segments), step_s=args.step,
+                   screen_km=args.screen_km, window_start=t0.isoformat(), start_method=start_method)
+    with mp.get_context(start_method).Pool(n_workers, initializer=init_worker,
+                                           initargs=(t0, args, telemetry.get_context())) as pool:
         results = []
         for n_done, seg_events in enumerate(pool.imap_unordered(screen_segment, segments), 1):
             results.extend(seg_events)
             print(f"  {n_done}/{len(segments)} segments done ({time.time() - started:.0f} s)", flush=True)
+            telemetry.info("{done}/{total} segments done, {events} events so far", done=n_done,
+                           total=len(segments), events=len(results))
 
     # An encounter on a segment boundary can be found by both neighbours: keep one.
     results.sort(key=lambda e: (e["norad_1"], e["norad_2"], e["tca_ms"]))
@@ -323,6 +461,10 @@ def main():
     print(f"{len(events)} conjunctions under {args.screen_km:g} km; {len(trusted)} after dropping "
           f"intra-constellation pairs beyond {INTRA_CUTOFF_HOURS} h "
           f"(red {counts['red']}, yellow {counts['yellow']}, green {counts['green']}) in {time.time() - started:.0f} s")
+    telemetry.info("{conjunctions} conjunctions: {red} red, {yellow} yellow, {green} green", conjunctions=len(events),
+                   trusted=len(trusted), seconds=round(time.time() - started), **counts)
+
+    zones = zones_payload(trusted, objs, sats, t0)
 
     stamp = t0.strftime("%Y%m%dT%H%M%SZ")
     DATA_DIR.mkdir(exist_ok=True)
@@ -347,9 +489,12 @@ def main():
         # Compact rows; names and groups are looked up from leo_objects.json by NORAD ID.
         "fields": APP_FIELDS,
         "rows": [[e[f] for f in APP_FIELDS] for e in trusted if e["risk"] != "green" or e["debris"]],
+        "debris_zones": zones,
     }, separators=(",", ":")))
     print(f"Wrote data/conjunctions_latest.csv and {APP_OUT.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
-    main()
+    telemetry.configure("screen-conjunctions", system_metrics=True)
+    with telemetry.span("Screen conjunctions"):
+        main()

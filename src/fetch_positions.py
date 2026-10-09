@@ -29,6 +29,8 @@ from sgp4 import omm
 from sgp4.api import Satrec, SatrecArray, jday
 from sgp4.propagation import gstime
 
+import telemetry
+
 GP_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=csv"
 # CelesTrak asks clients not to re-download the same group more than once per 2 hours.
 CACHE_MAX_AGE_S = 2 * 3600
@@ -68,17 +70,22 @@ def download_gp_csv(group, raw_path, refresh):
         age = time.time() - raw_path.stat().st_mtime
         if age < CACHE_MAX_AGE_S:
             print(f"Using cached {raw_path} ({age / 60:.0f} min old)")
+            telemetry.info("Using cached {group} elements, {age_min} min old", group=group, age_min=round(age / 60))
             return raw_path.read_text()
 
     url = GP_URL.format(group=group)
     print(f"Downloading {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "fusion-hackathon/0.1"})
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            text = resp.read().decode("utf-8")
+        with telemetry.span("Download {group} from CelesTrak", group=group, url=url) as span:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                text = resp.read().decode("utf-8")
+            span.set_attribute("bytes", len(text))
     except urllib.error.HTTPError as err:
         # CelesTrak answers 403 when the group was already fetched in the last 2 hours.
         body = err.read().decode("utf-8", "replace").strip()
+        telemetry.warn("CelesTrak refused {group} ({status})", group=group, status=err.code, body=body,
+                       cached_copy=raw_path.exists())
         if raw_path.exists():
             print(f"CelesTrak refused ({err.code}): {body}\nFalling back to cached {raw_path}")
             return raw_path.read_text()
@@ -261,12 +268,17 @@ def main():
 
     failed = sum(1 for row in rows if row["sgp4_error"])
     print(f"Wrote {len(rows)} objects at {t_iso} ({failed} SGP4 errors)")
+    telemetry.info("Wrote {objects} of {parsed} objects, {sgp4_errors} SGP4 errors", objects=len(rows),
+                   parsed=len(sats), sgp4_errors=failed, leo_only=args.leo, output=str(latest_path))
     print(f"Wrote {out_path} and {latest_path}")
     return 0
 
 
 if __name__ == "__main__":
+    telemetry.configure("fetch-positions")
     try:
-        sys.exit(main())
+        with telemetry.span("Fetch positions"):
+            code = main()
+        sys.exit(code)
     except RuntimeError as err:  # e.g. CelesTrak's 2-hour download limit
         sys.exit(f"Error: {err}")

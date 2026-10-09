@@ -1,17 +1,21 @@
 // Conjunction screening results (from src/screen_conjunctions.py): the critical-events panel with
 // live countdowns, and an analysis mode that shows both objects, their orbits, the TCA point and
-// their live separation.
+// their live separation. Critical debris-debris events are drawn as red zones, with a warning
+// naming the satellites that would fly through the fragments.
 
 import * as THREE from 'three';
 import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
 import { makeSatrec } from './data.js';
+import { SCENE_UNITS_PER_KM } from './config.js';
 
 const sat = window.satellite;
 const COLOR_A = 0xffd84d;
 const COLOR_B = 0xff4d4d;
 const MAX_ROWS = 100;
 const LEAD_MS = 10 * 60000;   // analysis starts 10 minutes before TCA
+const ZONE_LEAD_MS = 60 * 60000;   // a red zone and its warning appear this long before TCA
+const ZONE_LISTED = 8;             // exposed satellites named in the analysis card
 const $ = (id) => document.getElementById(id);
 
 export async function loadConjunctions() {
@@ -57,6 +61,23 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   const windowStartMs = Date.parse(data.window_start_utc);
   const windowEndMs = windowStartMs + data.window_hours * 3600000;
 
+  // Debris-debris red zones (debris_zones in src/screen_conjunctions.py), attached to their events.
+  const zoneRadiusKm = data.debris_zones?.radius_km ?? 0;
+  const eventKey = (e) => `${e.tca_ms}:${e.norad_1}:${e.norad_2}`;
+  const eventByKey = new Map(events.map((e) => [eventKey(e), e]));
+  const zoneEvents = [];
+  for (const z of data.debris_zones?.zones ?? []) {
+    const e = eventByKey.get(eventKey(z));
+    if (!e) continue;
+    e.zone = {
+      count: z.n_satellites, windowMin: z.window_min, endMs: z.tca_ms + z.window_min * 60000,
+      satellites: z.satellites.map(([norad, km, ms]) => ({ norad, km, ms, name: satByNorad.get(norad)?.name ?? `NORAD ${norad}` })),
+    };
+    zoneEvents.push(e);
+  }
+  zoneEvents.sort((a, b) => a.tca_ms - b.tca_ms);
+  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+
   // ---------- panel ----------
   $('conj').style.display = 'block';
   const c = data.counts ?? {};
@@ -82,6 +103,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   const matchesFilter = (e) => {
     if (focus) return involves(e, focus.norad);
     if (filterEl.value === 'debris') return satelliteVsDebris(e);
+    if (filterEl.value === 'zones') return !!e.zone;
     return filterEl.value === 'red' ? e.risk === 'red' : e.risk !== 'green';
   };
 
@@ -126,6 +148,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
         <div class="conj-names">${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
         <div class="conj-meta"><span class="when">in ${formatDuration(e.tca_ms - state.simTime)}</span>
           · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}</div>
+        ${e.zone ? `<div class="conj-zone">Red zone · ${e.zone.count ? `${plural(e.zone.count, 'satellite')} exposed` : 'no satellites nearby'}</div>` : ''}
       </div>`).join('') || '<div class="muted small">No events match.</div>';
   }
   // ---------- events per day (click a day to fast-forward there) ----------
@@ -173,6 +196,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     lastIds = '';
     renderList();
     renderCheck();
+    renderZoneCheck();
   }
 
   function renderCheck() {
@@ -206,6 +230,40 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
       <br><button id="checkNext">Analyse next debris approach</button></div>`;
     checkNextEvent = next;
   }
+  // Warn when the selected satellite flies through a coming debris-debris red zone.
+  function renderZoneCheck() {
+    const el = $('infoZone');
+    const hits = focus ? zoneEvents.filter((e) => e.zone.endMs >= state.simTime && e.zone.satellites.some((s) => s.norad === focus.norad)) : [];
+    if (!hits.length) { el.innerHTML = ''; return; }
+    const e = hits[0], pass = e.zone.satellites.find((s) => s.norad === focus.norad);
+    el.innerHTML = `<div class="check red"><div class="title">⚠ Debris–debris red zone on its path</div>
+      ${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)} come within ${e.miss_km.toFixed(3)} km of each other
+      ${e.tca_ms > state.simTime ? `in ${formatDuration(e.tca_ms - state.simTime)}` : `${formatDuration(state.simTime - e.tca_ms)} ago`}.
+      If they collide, this satellite passes ${pass.km.toFixed(0)} km from the collision point
+      ${formatDuration(pass.ms - e.tca_ms)} later and could be hit by fragments.
+      ${hits.length > 1 ? `<br>${hits.length - 1} more red zone${hits.length > 2 ? 's' : ''} on its path later.` : ''}</div>`;
+  }
+
+  // Top banner: the live or next red zone that has satellites exposed.
+  let alertEvent = null;
+  function renderAlert() {
+    const el = $('zoneAlert');
+    alertEvent = zoneEvents.find((e) => e.zone.count && state.simTime >= e.tca_ms - ZONE_LEAD_MS && state.simTime <= e.zone.endMs) ?? null;
+    if (!alertEvent) { el.style.display = 'none'; return; }
+    const e = alertEvent, z = e.zone, dt = e.tca_ms - state.simTime;
+    const named = z.satellites.slice(0, 3).map((s) => `${escapeHtml(s.name)} (${s.km.toFixed(0)} km)`).join(', ');
+    el.style.display = 'block';
+    const when = Math.abs(dt) < 500 ? 'risk now' : dt > 0 ? `risk in ${formatDuration(dt)}` : `risk: closest approach was ${formatDuration(-dt)} ago`;
+    el.innerHTML = `<b>⚠ Debris–debris collision ${when}</b>
+      <button id="zoneAlertBtn">Analyse</button><br>
+      ${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}: miss ${e.miss_km.toFixed(3)} km, Pc ${formatPc(e.pc)}. Neither can manoeuvre.
+      If they collide, fragments could harm <b>${plural(z.count, 'satellite')}</b> passing within ${zoneRadiusKm} km of the red zone:
+      ${named}${z.count > 3 ? ` and ${z.count - 3} more` : ''}.`;
+  }
+  $('zoneAlert').addEventListener('pointerdown', (ev) => {
+    if (ev.target.closest('#zoneAlertBtn') && alertEvent) analyze(alertEvent);
+  });
+
   // The card is redrawn several times a second, so act on pointerdown rather than click.
   let checkNextEvent = null;
   $('infoConj').addEventListener('pointerdown', (ev) => {
@@ -234,6 +292,36 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   let active = null, recA = null, recB = null;
   const tcaPoint = new THREE.Vector3();
 
+  // Red zones: a translucent sphere at the collision point, from an hour before TCA until one orbit after.
+  const zoneGroup = new THREE.Group();
+  const zoneGeometry = new THREE.SphereGeometry(zoneRadiusKm * SCENE_UNITS_PER_KM, 32, 20);
+  scene.add(zoneGroup);
+  function zoneMesh(e) {   // built the first time the zone is shown; null if SGP4 fails
+    if (e.zone.mesh !== undefined) return e.zone.mesh;
+    const tca = new Date(e.tca_ms);
+    const pa = sat.propagate(makeSatrec(satByNorad.get(e.norad_1)), tca)?.position;
+    const pb = sat.propagate(makeSatrec(satByNorad.get(e.norad_2)), tca)?.position;
+    e.zone.mesh = null;
+    if (pa && pb) {
+      e.zone.mesh = new THREE.Mesh(zoneGeometry,
+        new THREE.MeshBasicMaterial({ color: 0xff2d2d, transparent: true, opacity: 0.2, depthWrite: false }));
+      toScene((pa.x + pb.x) / 2, (pa.y + pb.y) / 2, (pa.z + pb.z) / 2, e.zone.mesh.position);
+      zoneGroup.add(e.zone.mesh);
+    }
+    return e.zone.mesh;
+  }
+  function updateZones(now) {
+    for (const e of zoneEvents) {
+      const shown = e === active || (state.simTime >= e.tca_ms - ZONE_LEAD_MS && state.simTime <= e.zone.endMs);
+      if (!shown && !e.zone.mesh) continue;
+      const mesh = zoneMesh(e);
+      if (!mesh) continue;
+      mesh.visible = shown;
+      // steady before closest approach, pulsing while fragments would be coming back through
+      mesh.material.opacity = state.simTime >= e.tca_ms ? 0.26 + 0.12 * Math.sin(now / 250) : 0.2;
+    }
+  }
+
   function analyze(e, focus = true) {
     active = e;
     recA = makeSatrec(satByNorad.get(e.norad_1));
@@ -243,6 +331,9 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     if (!pa || !pb) return;
     toScene((pa.x + pb.x) / 2, (pa.y + pb.y) / 2, (pa.z + pb.z) / 2, tcaPoint);
     tcaMarker.position.copy(tcaPoint);
+    tcaMarker.visible = !e.zone;   // a red zone marks the same point
+    markerA.scale.setScalar(e.zone ? 0.35 : 1);   // keep the two objects from hiding their zone
+    markerB.scale.setScalar(e.zone ? 0.35 : 1);
 
     orbitA.show(recA, e.tca_ms);
     orbitB.show(recB, e.tca_ms);
@@ -255,8 +346,22 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     $('conjPair').innerHTML = [[e.name_1, e.norad_1, e.group_1, 'a'], [e.name_2, e.norad_2, e.group_2, 'b']]
       .map(([name, id, g, cls]) => `<div class="pair"><span class="dot ${cls}"></span><b>${escapeHtml(name)}</b>
         <span class="muted small">NORAD ${id} · ${g}</span></div>`).join('');
+    $('conjZone').innerHTML = e.zone ? zoneHtml(e) : '';
     lastIds = '';
     onAnalyze();
+  }
+
+  function zoneHtml(e) {
+    const z = e.zone;
+    const rows = z.satellites.slice(0, ZONE_LISTED).map((s) =>
+      `<tr><td>${escapeHtml(s.name)}</td><td>${s.km.toFixed(0)} km</td><td>TCA + ${formatDuration(s.ms - e.tca_ms)}</td></tr>`).join('');
+    return `<div class="check red"><div class="title">⚠ Red zone: debris × debris</div>
+      Neither object can manoeuvre. If they collide, the fragments return through this point every orbit.
+      ${z.count
+        ? `In the ${z.windowMin.toFixed(0)} min after TCA, <b>${plural(z.count, 'active satellite')}</b>
+           ${z.count === 1 ? 'passes' : 'pass'} within ${zoneRadiusKm} km of it and could be harmed:
+           <table class="zone-sats">${rows}</table>${z.count > ZONE_LISTED ? `<div class="muted small">and ${z.count - ZONE_LISTED} more</div>` : ''}`
+        : `No active satellite passes within ${zoneRadiusKm} km of it in the ${z.windowMin.toFixed(0)} min after TCA.`}</div>`;
   }
 
   function close() {
@@ -275,7 +380,8 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   let lastList = 0, lastDetail = 0;
   function update(prevSimTime) {
     const now = performance.now();
-    if (now - lastList > 400) { lastList = now; renderList(); renderCheck(); }
+    if (now - lastList > 400) { lastList = now; renderList(); renderCheck(); renderZoneCheck(); renderAlert(); }
+    updateZones(now);
     if (!active) return;
 
     // Pause exactly at TCA when the clock runs through it.

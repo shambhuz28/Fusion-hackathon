@@ -67,6 +67,7 @@
   <h2 id="infoName"></h2>
   <div class="muted small" id="infoSub"></div>
   <div id="infoConj"></div>
+  <div id="infoZone"></div>
   <dl id="infoBody"></dl>
 </div>
 
@@ -83,6 +84,7 @@
       <option value="red">Critical only</option>
       <option value="all">Critical + watch</option>
       <option value="debris">Satellite vs debris (all &lt; 5 km)</option>
+      <option value="zones">Debris vs debris red zones</option>
     </select>
     <select id="conjSort" aria-label="Sort events">
       <option value="tca">Soonest TCA</option>
@@ -112,12 +114,15 @@
   </div>
   <div id="conjPair"></div>
   <dl id="conjDetailBody"></dl>
+  <div id="conjZone"></div>
   <div class="row">
     <button id="conjLead">TCA − 10 min</button>
     <button id="conjTca">Jump to TCA</button>
     <label class="small"><input type="checkbox" id="conjAutoPause" checked> Pause at TCA</label>
   </div>
 </div>
+
+<div id="zoneAlert" class="card" role="alert"></div>
 
 <script type="module" src="js/main.js"></script>
 </body>

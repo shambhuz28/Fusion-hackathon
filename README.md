@@ -117,6 +117,28 @@ In the simulation: select any satellite to see its debris check (green = no debr
 screening window; otherwise count, next approach, closest miss and highest Pc, with a button to analyse it).
 The conjunction list then shows only that satellite's events; the filter "Satellite vs debris" lists all of them.
 
+### Debris-vs-debris red zones
+
+A critical conjunction between two debris objects cannot be avoided: neither can manoeuvre. If they
+collide, the fragments spread along both orbits and all return through the collision point once per orbit.
+The screener therefore turns every critical (red) debris-debris event into a **red zone**: a 100 km sphere
+around the predicted collision point. For each zone it lists the active satellites that pass through that
+sphere between TCA and one orbital period later (`debris_zones` in `src/screen_conjunctions.py`).
+
+In the simulation the zone is drawn as a red sphere from one hour before TCA until the end of that orbit
+(pulsing after TCA). When satellites are exposed, a banner names them; the analysis card lists each one's
+closest distance and time, and selecting an exposed satellite shows the warning in its card. The filter
+"Debris vs debris red zones" lists all of them.
+
+In the current 7-day run: 28 red zones, 22 with at least one active satellite passing through (up to 194).
+The satellite lists were checked against a 1-second brute-force search of every active object for two zones:
+same satellites, distances within 0.34 km. The zone is a simplified indicator, not a fragment-cloud model:
+the 100 km radius and the one-orbit window are chosen values, and a predicted close approach is not a collision.
+
+```bash
+.venv/bin/python src/screen_conjunctions.py --zones-only   # redo only the zones of the existing app file (~20 s)
+```
+
 ### 7-day look-ahead
 
 The default window is 7 days (`--hours 168`), split into day-long segments screened in parallel (`--workers`).
@@ -166,3 +188,16 @@ assumed covariance.
 If port 8765 is busy (for example the simulation is already running), `run.sh` uses the next free port and
 prints the URL. The Python scripts can be started with plain `python3` too: they re-run themselves with
 `.venv/bin/python` when the packages are missing (`src/_venv.py`).
+
+## Telemetry (Logfire)
+
+The pipeline scripts report to [Logfire](https://logfire.pydantic.dev) so a run can be watched live:
+each script is a trace, the screener adds one span per day-long segment (coarse-screen time, candidate
+and event counts, refinement time), and CPU and memory are recorded while it runs. See `src/telemetry.py`.
+
+```bash
+.venv/bin/logfire auth                                  # once per machine (.venv\Scripts\logfire on Windows)
+.venv/bin/logfire projects use --org <org> <project>    # once per clone; writes .logfire/ (git-ignored)
+```
+
+Without the `logfire` package or without credentials the scripts run exactly as before and send nothing.
