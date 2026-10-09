@@ -15,11 +15,16 @@
 </head>
 <body>
 <div id="scene"></div>
+<div id="notice" role="status"></div>
 <div id="loading">Loading satellites…</div>
 
 <div id="panel" class="card">
   <h1>LEO Satellite Simulation</h1>
   <div class="muted small" id="subtitle"></div>
+  <div class="row">
+    <select id="datasetSel" aria-label="Data source" style="width:100%"></select>
+  </div>
+  <div id="eventBanner"></div>
   <div id="clock">—</div>
   <div class="row" id="speeds"></div>
   <div class="row">
@@ -77,6 +82,15 @@
     <span class="muted small" id="conjCount"></span>
   </div>
   <div class="muted small" id="conjSummary"></div>
+  <div id="conjStatus"></div>
+  <div class="row">
+    <button id="conjScreenHere">Screen from current time</button>
+    <select id="conjSpan" aria-label="Length of on-demand screening">
+      <option value="24" selected>24 h</option>
+      <option value="72">3 days</option>
+      <option value="168">7 days</option>
+    </select>
+  </div>
   <div class="conj-next" id="conjNext"></div>
 
   <div class="row">
@@ -120,6 +134,8 @@
     <button id="conjTca">Jump to TCA</button>
     <label class="small"><input type="checkbox" id="conjAutoPause" checked> Pause at TCA</label>
   </div>
+  <div class="row"><button id="conjManeuver" class="primary">Suggest avoidance manoeuvre</button></div>
+  <div id="conjPlan"></div>
 </div>
 
 <div id="zoneAlert" class="card" role="alert"></div>

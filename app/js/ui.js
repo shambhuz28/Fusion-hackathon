@@ -3,13 +3,16 @@
 import { GROUP_COLORS, SPEEDS } from './config.js';
 import { altitudeGradientCss } from './colors.js';
 import { altitudeKm } from './orbit.js';
+import { notify } from './notice.js';
 
 const $ = (id) => document.getElementById(id);
 
-export function createPanel({ sats, groupNames, generatedUtc, state, onColorModeChange, onLeoToggle, onSearchSelect }) {
+export function createPanel({ sats, groupNames, generatedUtc, clockRange, event, state, onColorModeChange, onLeoToggle, onSearchSelect }) {
   const nDebris = sats.filter(s => s.group === 'Debris').length;
-  $('subtitle').textContent = `${(sats.length - nDebris).toLocaleString()} LEO satellites + ${nDebris.toLocaleString()} debris · SGP4 · ` +
-    `elements from ${generatedUtc.slice(0, 16).replace('T', ' ')} UTC`;
+  const dataNote = event
+    ? `elements published before ${event.cutoff_utc.slice(0, 16).replace('T', ' ')} UTC (Space-Track)`
+    : `elements from ${generatedUtc.slice(0, 16).replace('T', ' ')} UTC`;
+  $('subtitle').textContent = `${(sats.length - nDebris).toLocaleString()} LEO satellites + ${nDebris.toLocaleString()} debris · SGP4 · ${dataNote}`;
 
   // speed buttons
   const speedsEl = $('speeds');
@@ -25,16 +28,30 @@ export function createPanel({ sats, groupNames, generatedUtc, state, onColorMode
     for (const b of speedsEl.children) b.classList.toggle('active', Number(b.dataset.speed) === v);
   }
   setSpeed(state.speed);
-  $('now').onclick = () => { state.simTime = Date.now(); };
-  $('plusHour').onclick = () => { state.simTime += 3600000; };
-  $('plusDay').onclick = () => { state.simTime += 86400000; };
-  $('plusWeek').onclick = () => { state.simTime += 7 * 86400000; };
+  // Every jump goes through jumpTo, which keeps the clock inside the loaded data's validity range.
+  const fmtUtc = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+  function jumpTo(ms) {
+    if (!Number.isFinite(ms)) {
+      notify('Enter a date and time first.');
+      return;
+    }
+    const [lo, hi] = clockRange;
+    if (ms < lo || ms > hi) {
+      notify(`No orbital data for ${fmtUtc(ms)} UTC: the loaded elements are valid ${fmtUtc(lo)} – ${fmtUtc(hi)} UTC. ` +
+        'Past events (e.g. the 2009 Iridium–Cosmos collision) need historical element sets.', 10000);
+      ms = Math.min(hi, Math.max(lo, ms));
+    }
+    state.simTime = ms;
+  }
+  $('now').onclick = () => jumpTo(Date.now());
+  $('plusHour').onclick = () => jumpTo(state.simTime + 3600000);
+  $('plusDay').onclick = () => jumpTo(state.simTime + 86400000);
+  $('plusWeek').onclick = () => jumpTo(state.simTime + 7 * 86400000);
   // datetime-local has no time zone; the value is read as UTC.
-  $('goDate').value = new Date(state.simTime).toISOString().slice(0, 16);
-  $('goDateBtn').onclick = () => {
-    const ms = Date.parse($('goDate').value + ':00Z');
-    if (!Number.isNaN(ms)) state.simTime = ms;
-  };
+  $('goDate').min = new Date(clockRange[0]).toISOString().slice(0, 16);
+  $('goDate').max = new Date(clockRange[1]).toISOString().slice(0, 16);
+  $('goDate').value = new Date(Math.min(clockRange[1], Math.max(clockRange[0], state.simTime))).toISOString().slice(0, 16);
+  $('goDateBtn').onclick = () => jumpTo(Date.parse($('goDate').value + ':00Z'));
 
   // colour mode + LEO boundary toggle
   $('gradient').style.background = altitudeGradientCss();
@@ -121,5 +138,5 @@ export function createPanel({ sats, groupNames, generatedUtc, state, onColorMode
     clockEl.textContent = new Date(state.simTime).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
   }
 
-  return { updateStats, updateClock, showGroup, setSpeed };
+  return { updateStats, updateClock, showGroup, setSpeed, jumpTo };
 }

@@ -12,7 +12,7 @@ export const EARTH_TEXTURE_URL = 'https://cdn.jsdelivr.net/npm/three-globe@2.31.
 export const GROUP_COLORS = {
   Starlink: '#4ea8ff', OneWeb: '#ff9f43', Kuiper: '#b48cff', Qianfan: '#ff5c8a',
   Guowang: '#ffd84d', Iridium: '#3ddc97', Planet: '#9be15d', Spire: '#5ce1e6',
-  Station: '#ffffff', Other: '#b7c0cf', Debris: '#ff4d4d',
+  Station: '#ffffff', Other: '#b7c0cf', 'Rocket body': '#d29a6a', Debris: '#ff4d4d',
 };
 
 // [time multiplier, button label]

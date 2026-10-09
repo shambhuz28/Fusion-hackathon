@@ -19,6 +19,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
   document.getElementById('close').onclick = () => select(-1);
 
   let rec = null;          // satellite.js satrec of the selected satellite
+  let selected = null;     // its entry in sats (name, validity window, ...)
   let lastInfo = 0;
   setVisible(false);
 
@@ -32,10 +33,12 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
   function select(i, focus = false) {
     if (i < 0) {
       rec = null;
+      selected = null;
       setVisible(false);
       return;
     }
     const s = sats[i];
+    selected = s;
     rec = makeSatrec(s);
     document.getElementById('infoName').textContent = s.name;
     document.getElementById('infoSub').textContent = `NORAD ${s.norad} · ${s.group}`;
@@ -59,8 +62,17 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
   function update() {
     if (!rec) return;
     const date = new Date(state.simTime);
-    const pv = sat.propagate(rec, date);
-    if (!pv?.position) return;
+    const valid = state.simTime >= selected.validFrom && state.simTime <= selected.validTo;
+    const pv = valid ? sat.propagate(rec, date) : null;
+    marker.visible = arrow.visible = !!pv?.position;
+    orbit.line.visible = !!pv?.position;
+    if (!pv?.position) {
+      const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+      document.getElementById('infoBody').innerHTML = valid
+        ? '<dt>Status</dt><dd>SGP4 has no valid state (e.g. decayed)</dd>'
+        : `<dt>No data for this time</dt><dd>elements valid ${fmt(selected.validFrom)} – ${fmt(selected.validTo)} UTC</dd>`;
+      return;
+    }
     const p = toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3());
     const v = toScene(pv.velocity.x, pv.velocity.y, pv.velocity.z, new THREE.Vector3());
     marker.position.copy(p);

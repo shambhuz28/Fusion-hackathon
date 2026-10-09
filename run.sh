@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the whole project: fetch orbital data, compute positions, export the simulation data,
-# screen conjunctions for 7 days, then serve the 3D simulation.
+# screen conjunctions for 7 days, then serve the 3D simulation (src/server.py).
 #
 #   ./run.sh               full pipeline + server (~5 min before the server starts)
 #   ./run.sh --serve-only  just serve the simulation with the existing data
@@ -50,19 +50,5 @@ if [ "${1:-}" != "--serve-only" ]; then
   "$PY" src/screen_conjunctions.py
 fi
 
-# Use the next free port if the requested one is taken (e.g. the simulation is already running).
-port_free() { python3 -c "import socket, sys; s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1])))" "$1" 2>/dev/null; }
-REQUESTED_PORT="$PORT"
-while ! port_free "$PORT"; do
-  PORT=$((PORT + 1))
-  if [ "$PORT" -gt $((REQUESTED_PORT + 20)) ]; then
-    echo "No free port between $REQUESTED_PORT and $PORT; set PORT=... to choose one." >&2
-    exit 1
-  fi
-done
-if [ "$PORT" != "$REQUESTED_PORT" ]; then
-  echo "Port $REQUESTED_PORT is already in use (is the simulation already running there?); using $PORT instead."
-fi
-
-echo "== 4/4 Simulation running at http://127.0.0.1:$PORT (Ctrl+C to stop) =="
-python3 -m http.server "$PORT" -d app --bind 127.0.0.1
+echo "== 4/4 Starting the simulation server (also screens any chosen date on demand) =="
+exec "$PY" src/server.py --port "$PORT"
