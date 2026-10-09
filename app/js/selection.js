@@ -4,28 +4,27 @@
 import * as THREE from 'three';
 import { EARTH_RADIUS_KM, SCENE_UNITS_PER_KM } from './config.js';
 import { elementAgeDays, perigeeApogeeKm, periodMinutes, toScene } from './orbit.js';
+import { createOrbitPath } from './orbitPath.js';
 
 const sat = window.satellite;
-const ORBIT_STEPS = 240;
 
 export function createSelection({ scene, camera, renderer, points, sats, state, onSelect }) {
   const marker = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffffff }));
   const arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1.4, 0xffd84d, 0.28, 0.14);
-  const orbitLine = new THREE.Line(new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 }));
-  scene.add(marker, arrow, orbitLine);
+  const orbit = createOrbitPath();
+  scene.add(marker, arrow, orbit.line);
 
   const infoEl = document.getElementById('info');
   document.getElementById('close').onclick = () => select(-1);
 
   let rec = null;          // satellite.js satrec of the selected satellite
-  let orbitCenter = 0;     // sim time the orbit path was built around
   let lastInfo = 0;
   setVisible(false);
 
   function setVisible(v) {
-    marker.visible = arrow.visible = orbitLine.visible = v;
+    marker.visible = arrow.visible = v;
     infoEl.style.display = v ? 'block' : 'none';
+    if (!v) orbit.hide();
   }
 
   // i < 0 clears the selection; focus turns the camera towards the satellite.
@@ -40,7 +39,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
     document.getElementById('infoName').textContent = s.name;
     document.getElementById('infoSub').textContent = `NORAD ${s.norad} · ${s.group}`;
     setVisible(true);
-    buildOrbit();
+    orbit.show(rec, state.simTime);
     onSelect(s);
     if (focus) focusCamera();
   }
@@ -55,18 +54,6 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
     camera.position.copy(r.add(normal.multiplyScalar(0.9)).normalize().multiplyScalar(Math.max(camera.position.length(), 20)));
   }
 
-  // Orbit path over one period centred on the current time (inertial frame).
-  function buildOrbit() {
-    const T = periodMinutes(rec) * 60000, pts = [];
-    orbitCenter = state.simTime;
-    for (let k = 0; k <= ORBIT_STEPS; k++) {
-      const pv = sat.propagate(rec, new Date(state.simTime - T / 2 + (T * k) / ORBIT_STEPS));
-      if (pv.position) pts.push(toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3()));
-    }
-    orbitLine.geometry.dispose();
-    orbitLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
-  }
-
   // Called every frame: exact SGP4 state for the selected satellite.
   function update() {
     if (!rec) return;
@@ -78,7 +65,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
     marker.position.copy(p);
     arrow.position.copy(p);
     arrow.setDirection(v.normalize());
-    if (Math.abs(state.simTime - orbitCenter) > periodMinutes(rec) * 15000) buildOrbit();
+    orbit.update(state.simTime);
 
     const now = performance.now();
     if (now - lastInfo > 150) {

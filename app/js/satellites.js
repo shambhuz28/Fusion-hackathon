@@ -20,11 +20,12 @@ export function createSatelliteLayer(sats) {
   const v3 = new THREE.Vector3();
   const tmpColor = new THREE.Color();
 
-  // Extrapolate from the worker's last SGP4 state with its velocity (error < ~2 km at 1000x).
+  // Extrapolate from the worker's last SGP4 state with its velocity. Capped at ±30 s (error < ~4 km):
+  // at very high speeds the dots then trail the clock slightly instead of leaving their orbits.
   function updatePositions(state) {
     const { latest, simTime, visibleGroups } = state;
     if (!latest) return;
-    const k = (simTime - latest.time) / 1000, p = latest.pos, v = latest.vel;
+    const k = Math.max(-30, Math.min(30, (simTime - latest.time) / 1000)), p = latest.pos, v = latest.vel;
     for (let i = 0; i < n; i++) {
       const j = i * 3;
       if (Number.isNaN(p[j]) || !visibleGroups.has(sats[i].group)) {

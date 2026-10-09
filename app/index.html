@@ -24,6 +24,15 @@
   <div class="row" id="speeds"></div>
   <div class="row">
     <button id="now">Jump to now</button>
+    <button id="plusHour">+1 h</button>
+    <button id="plusDay">+1 day</button>
+    <button id="plusWeek">+1 week</button>
+  </div>
+  <div class="row">
+    <input id="goDate" type="datetime-local" step="60" aria-label="Date and time (UTC)">
+    <button id="goDateBtn">Go (UTC)</button>
+  </div>
+  <div class="row">
     <select id="colorMode" aria-label="Colour satellites by">
       <option value="group">Colour: constellation</option>
       <option value="altitude">Colour: altitude</option>
@@ -57,7 +66,57 @@
   <button id="close" aria-label="Close">×</button>
   <h2 id="infoName"></h2>
   <div class="muted small" id="infoSub"></div>
+  <div id="infoConj"></div>
   <dl id="infoBody"></dl>
+</div>
+
+<div id="conj" class="card">
+  <div class="conj-head">
+    <h1>Conjunction screening</h1>
+    <span class="muted small" id="conjCount"></span>
+  </div>
+  <div class="muted small" id="conjSummary"></div>
+  <div class="conj-next" id="conjNext"></div>
+
+  <div class="row">
+    <select id="conjFilter" aria-label="Which events">
+      <option value="red">Critical only</option>
+      <option value="all">Critical + watch</option>
+      <option value="debris">Satellite vs debris (all &lt; 5 km)</option>
+    </select>
+    <select id="conjSort" aria-label="Sort events">
+      <option value="tca">Soonest TCA</option>
+      <option value="pc">Highest Pc</option>
+      <option value="miss">Smallest miss</option>
+    </select>
+    <select id="conjRange" aria-label="Look-ahead window">
+      <option value="1">Next 1 h</option>
+      <option value="6">Next 6 h</option>
+      <option value="24" selected>Next 24 h</option>
+      <option value="72">Next 3 days</option>
+      <option value="all">Whole window</option>
+    </select>
+  </div>
+  <div class="section-title" style="margin-top:8px">Events per day · click to jump</div>
+  <div id="conjDays"></div>
+  <label class="small"><input type="checkbox" id="conjHideSame"> Hide same-constellation pairs</label>
+  <div id="conjFocus"></div>
+  <div id="conjList"></div>
+  <div class="muted small" id="conjNote"></div>
+</div>
+
+<div id="conjDetail" class="card">
+  <div class="conj-head">
+    <h1>Analysing conjunction</h1>
+    <button id="conjClose" aria-label="Close analysis">×</button>
+  </div>
+  <div id="conjPair"></div>
+  <dl id="conjDetailBody"></dl>
+  <div class="row">
+    <button id="conjLead">TCA − 10 min</button>
+    <button id="conjTca">Jump to TCA</button>
+    <label class="small"><input type="checkbox" id="conjAutoPause" checked> Pause at TCA</label>
+  </div>
 </div>
 
 <script type="module" src="js/main.js"></script>

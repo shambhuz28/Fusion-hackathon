@@ -7,8 +7,9 @@ import { altitudeKm } from './orbit.js';
 const $ = (id) => document.getElementById(id);
 
 export function createPanel({ sats, groupNames, generatedUtc, state, onColorModeChange, onLeoToggle, onSearchSelect }) {
-  $('subtitle').textContent =
-    `${sats.length.toLocaleString()} LEO satellites · SGP4 · elements from ${generatedUtc.slice(0, 16).replace('T', ' ')} UTC`;
+  const nDebris = sats.filter(s => s.group === 'Debris').length;
+  $('subtitle').textContent = `${(sats.length - nDebris).toLocaleString()} LEO satellites + ${nDebris.toLocaleString()} debris · SGP4 · ` +
+    `elements from ${generatedUtc.slice(0, 16).replace('T', ' ')} UTC`;
 
   // speed buttons
   const speedsEl = $('speeds');
@@ -25,6 +26,15 @@ export function createPanel({ sats, groupNames, generatedUtc, state, onColorMode
   }
   setSpeed(state.speed);
   $('now').onclick = () => { state.simTime = Date.now(); };
+  $('plusHour').onclick = () => { state.simTime += 3600000; };
+  $('plusDay').onclick = () => { state.simTime += 86400000; };
+  $('plusWeek').onclick = () => { state.simTime += 7 * 86400000; };
+  // datetime-local has no time zone; the value is read as UTC.
+  $('goDate').value = new Date(state.simTime).toISOString().slice(0, 16);
+  $('goDateBtn').onclick = () => {
+    const ms = Date.parse($('goDate').value + ':00Z');
+    if (!Number.isNaN(ms)) state.simTime = ms;
+  };
 
   // colour mode + LEO boundary toggle
   $('gradient').style.background = altitudeGradientCss();
@@ -74,7 +84,7 @@ export function createPanel({ sats, groupNames, generatedUtc, state, onColorMode
       altSum += altitudeKm(p[j], p[j + 1], p[j + 2]);
       vSum += Math.hypot(v[j], v[j + 1], v[j + 2]);
     }
-    $('stats').innerHTML = `<dt>Satellites</dt><dd>${n.toLocaleString()}</dd>` +
+    $('stats').innerHTML = `<dt>Objects</dt><dd>${n.toLocaleString()}</dd>` +
       `<dt>Mean altitude</dt><dd>${n ? (altSum / n).toFixed(0) : '–'} km</dd>` +
       `<dt>Mean speed</dt><dd>${n ? (vSum / n).toFixed(2) : '–'} km/s</dd>`;
   }
@@ -111,5 +121,5 @@ export function createPanel({ sats, groupNames, generatedUtc, state, onColorMode
     clockEl.textContent = new Date(state.simTime).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
   }
 
-  return { updateStats, updateClock, showGroup };
+  return { updateStats, updateClock, showGroup, setSpeed };
 }

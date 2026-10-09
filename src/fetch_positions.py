@@ -265,4 +265,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as err:  # e.g. CelesTrak's 2-hour download limit
+        sys.exit(f"Error: {err}")

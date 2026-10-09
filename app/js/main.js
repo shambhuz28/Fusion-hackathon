@@ -8,10 +8,11 @@ import { createSatelliteLayer } from './satellites.js';
 import { startPropagator } from './propagator.js';
 import { createSelection } from './selection.js';
 import { createPanel } from './ui.js';
+import { createConjunctionView, loadConjunctions } from './conjunctions.js';
 
 const sat = window.satellite;
 
-const { sats, groupNames, generatedUtc } = await loadSatellites();
+const [{ sats, groupNames, generatedUtc }, conjData] = await Promise.all([loadSatellites(), loadConjunctions()]);
 groupNames.forEach(g => state.visibleGroups.add(g));
 
 const { renderer, scene, camera, controls, earth } = createScene(document.getElementById('scene'));
@@ -28,7 +29,18 @@ const panel = createPanel({
 
 const selection = createSelection({
   scene, camera, renderer, points: layer.points, sats, state,
-  onSelect: (s) => panel.showGroup(s.group),
+  onSelect: (s) => {
+    panel.showGroup(s.group);
+    conjunctions?.close();  // the satellite card and the conjunction analysis share the bottom-right corner
+    conjunctions?.setFocus(s);  // list this satellite's conjunctions and show its debris check
+  },
+});
+
+// Conjunction panel (only when src/screen_conjunctions.py has produced data/conjunctions.json).
+const conjunctions = conjData && createConjunctionView({
+  data: conjData, scene, camera, sats, state,
+  setSpeed: panel.setSpeed,
+  onAnalyze: () => selection.select(-1),
 });
 
 let colored = false;
@@ -46,6 +58,7 @@ startPropagator(sats, state, {
 
 let lastFrame = performance.now();
 function frame(now) {
+  const prevSimTime = state.simTime;
   state.simTime += (now - lastFrame) * state.speed;
   lastFrame = now;
 
@@ -53,6 +66,7 @@ function frame(now) {
   earth.rotation.y = sat.gstime(new Date(state.simTime));  // keeps ground locations under the ECI positions
   layer.updatePositions(state);
   selection.update();
+  conjunctions?.update(prevSimTime);
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
