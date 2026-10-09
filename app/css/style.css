@@ -27,6 +27,38 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   display: none; scrollbar-width: thin; scrollbar-color: rgba(140, 160, 200, 0.35) transparent; }
 #conjDetail { border-color: rgba(255, 77, 77, 0.45); }
 #conjFocus:empty { display: none; }
+button.primary { background: rgba(61, 220, 151, 0.18); border-color: rgba(61, 220, 151, 0.6); font-weight: 600; }
+button.primary:hover { background: rgba(61, 220, 151, 0.3); }
+.planning { margin-top: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12px;
+  border: 1px solid rgba(78, 168, 255, 0.5); background: rgba(78, 168, 255, 0.1); }
+#conjPlan select { margin-top: 8px; }
+#conjPlan ul { margin: 4px 0 0; padding-left: 18px; }
+table.plan { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+table.plan th, table.plan td { padding: 2px 4px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+table.plan th:first-child, table.plan td:first-child { text-align: left; }
+table.plan .dot { display: inline-block; margin-right: 4px; vertical-align: 0; }
+#conjStatus:empty { display: none; }
+#conjStatus { margin: 8px 0 0; padding: 6px 8px; border-radius: 6px; font-size: 12px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); }
+#conjStatus.loading { border-color: rgba(78, 168, 255, 0.5); background: rgba(78, 168, 255, 0.1); }
+#conjStatus.warn { border-color: rgba(255, 216, 77, 0.5); background: rgba(255, 216, 77, 0.08); }
+#conjStatus code { font-size: 11px; }
+.spinner { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid rgba(78, 168, 255, 0.35); border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#eventBanner:empty { display: none; }
+#eventBanner { margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+  background: rgba(255, 77, 77, 0.1); border: 1px solid rgba(255, 77, 77, 0.45); }
+#eventBanner .title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+#eventBanner table { width: 100%; border-collapse: collapse; margin: 6px 0; font-variant-numeric: tabular-nums; }
+#eventBanner th, #eventBanner td { padding: 2px 4px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+#eventBanner td.wrap { white-space: normal; text-align: left; }
+#eventBanner th:first-child, #eventBanner td:first-child { text-align: left; }
+#notice { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 10; max-width: min(560px, calc(100% - 32px));
+  padding: 8px 14px; border-radius: 8px; background: rgba(40, 32, 8, 0.92); border: 1px solid rgba(255, 216, 77, 0.6);
+  color: var(--text); font-size: 13px; display: none; }
+#notice.show { display: block; }
 #conjDays { display: flex; gap: 4px; align-items: flex-end; margin: 4px 0 6px; }
 #conjDays .day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px;
   min-width: 0; background: transparent; border-color: transparent; }

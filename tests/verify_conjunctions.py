@@ -139,14 +139,18 @@ def check_events(meta, sats, index, t0, jd0, fr0, events, samples):
 def brute_force(meta, objs, sats, t0, jd0, fr0, events, start_s, minutes):
     """1 s steps, linear closest approach within each step, exact SGP4 refinement of hits."""
     arr = SatrecArray(sats)
+    valid_from, valid_to, _ = sc.load_validity()   # same per-object validity windows as the screener
+    t0_ms = t0.timestamp() * 1000
     screen_km = meta["screen_km"]
     radius = sc.MAX_REL_SPEED_KM_S * 0.5 + screen_km + 1
     best = {}
     for c0 in range(0, minutes * 60, 120):
         secs = start_s + c0 + np.arange(120.0)
         err, r, v = arr.sgp4(np.full(secs.size, jd0), fr0 + secs / 86400.0)
+        t_ms = t0_ms + secs * 1000
+        bad = (err != 0) | (t_ms[None, :] < valid_from[:, None]) | (t_ms[None, :] > valid_to[:, None])
         for k in range(secs.size):
-            p = np.where((err[:, k] != 0)[:, None], 1e9, r[:, k, :])
+            p = np.where(bad[:, k][:, None], 1e9 + np.arange(len(sats))[:, None] * 1e4, r[:, k, :])
             pairs = cKDTree(p).query_pairs(radius, output_type="ndarray")
             if not len(pairs):
                 continue
@@ -163,7 +167,11 @@ def brute_force(meta, objs, sats, t0, jd0, fr0, events, start_s, minutes):
     found = {}
     for (a, b), (_, tt) in best.items():
         res = sc.refine(sats[a], sats[b], jd0, fr0, float(tt))
-        if res and np.linalg.norm(res[3] - res[1]) < screen_km and start_s <= res[0] <= start_s + minutes * 60:
+        tca_ms = t0_ms + res[0] * 1000 if res else 0
+        if res and sc.untrusted_intra_pair(objs, sats, a, b, float(res[0]), jd0, fr0):
+            continue   # skipped by the screener by design (stale same-constellation elements)
+        if res and np.linalg.norm(res[3] - res[1]) < screen_km and start_s <= res[0] <= start_s + minutes * 60 \
+                and valid_from[a] <= tca_ms <= valid_to[a] and valid_from[b] <= tca_ms <= valid_to[b]:
             found[(objs[a]["norad_id"], objs[b]["norad_id"])] = res[0]
     lo, hi = (t0.timestamp() + start_s) * 1000, (t0.timestamp() + start_s + minutes * 60) * 1000
     screened = {}

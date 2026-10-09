@@ -4,3 +4,6 @@ data/raw/
 data/*_positions_2*.csv
 data/conjunctions_2*.csv
 data/conjunctions_latest.csv
+data/cache/
+data/history/
+app/data/history/

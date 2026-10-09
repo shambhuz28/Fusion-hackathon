@@ -8,6 +8,11 @@ elements. Both the browser (satellite.js json2satrec) and src/screen_conjunction
 Why OMM rather than TLE: the TLE text format rounds eccentricity to 7 digits and B* to
 5 significant digits, which moved some fast-decaying debris by up to ~280 m.
 
+Each object also gets a validity window: VALIDITY_DAYS either side of its element epoch (SGP4
+predictions degrade by km per day and are meaningless months away), and never before its estimated
+launch (epoch - REV_AT_EPOCH / MEAN_MOTION). The browser hides an object outside its window and the
+screener ignores it, so the 2026 catalogue is not shown in, say, 2009.
+
 Epochs are written on whole milliseconds because satellite.js parses EPOCH with a
 JavaScript Date (millisecond resolution). The dropped sub-millisecond part is moved
 into the mean anomaly (M - n * dt), which describes the same orbit to within millimetres.
@@ -36,6 +41,9 @@ OMM_FIELDS = [
     "ARG_OF_PERICENTER", "MEAN_ANOMALY", "EPHEMERIS_TYPE", "CLASSIFICATION_TYPE", "NORAD_CAT_ID",
     "ELEMENT_SET_NO", "REV_AT_EPOCH", "BSTAR", "MEAN_MOTION_DOT", "MEAN_MOTION_DDOT",
 ]
+VALIDITY_DAYS = 30
+DAY_MS = 86400000
+
 TEXT_FIELDS = {"OBJECT_NAME", "OBJECT_ID", "EPOCH", "CLASSIFICATION_TYPE"}
 INT_FIELDS = {"EPHEMERIS_TYPE", "NORAD_CAT_ID", "ELEMENT_SET_NO", "REV_AT_EPOCH"}
 
@@ -76,22 +84,50 @@ def millisecond_omm(fields):
     return rec
 
 
+def validity_window_ms(fields):
+    """(valid_from, valid_to) in Unix ms: +-VALIDITY_DAYS around the epoch, not before the estimated launch."""
+    epoch = datetime.strptime(fields["EPOCH"], "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    epoch_ms = int(epoch.timestamp() * 1000)
+    valid_from, valid_to = epoch_ms - VALIDITY_DAYS * DAY_MS, epoch_ms + VALIDITY_DAYS * DAY_MS
+    # Revolutions since launch / revolutions per day = days since launch. The counter wraps at 100,000, so the
+    # estimate is only trusted when it agrees with the launch year in the international designator.
+    # Space-Track records carry the real launch and decay dates; use them when present.
+    if fields.get("LAUNCH_DATE"):
+        launch = datetime.strptime(fields["LAUNCH_DATE"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        valid_from = max(valid_from, int(launch.timestamp() * 1000))
+    else:
+        revs, rev_per_day = int(fields["REV_AT_EPOCH"]), float(fields["MEAN_MOTION"])
+        launch_ms = epoch_ms - revs / rev_per_day * DAY_MS
+        launch_year = int(fields["OBJECT_ID"][:4]) if fields["OBJECT_ID"][:4].isdigit() else None
+        if launch_year is not None and datetime.fromtimestamp(launch_ms / 1000, timezone.utc).year == launch_year:
+            valid_from = max(valid_from, int(launch_ms))
+    if fields.get("DECAY_DATE"):
+        decay = datetime.strptime(fields["DECAY_DATE"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        valid_to = min(valid_to, int(decay.timestamp() * 1000) + DAY_MS)
+    return valid_from, valid_to
+
+
 def read_gp(path):
     text = Path(path).read_text()
     check_gp_csv(text)
     return text
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("inputs", nargs="*", default=["data/raw/active_gp.csv"], help="GP CSV files of satellites")
-    parser.add_argument("--debris", nargs="+", default=[], help="GP CSV files of debris objects")
-    args = parser.parse_args()
+def group_of(fields, debris_ids):
+    """Legend group: debris (from --debris files or Space-Track's OBJECT_TYPE), rocket body, or constellation."""
+    norad_id = fields["NORAD_CAT_ID"]
+    object_type = (fields.get("OBJECT_TYPE") or "").upper()
+    if norad_id in debris_ids or object_type == "DEBRIS":
+        return "Debris"
+    if object_type == "ROCKET BODY":
+        return "Rocket body"
+    return constellation(norad_id, fields["OBJECT_NAME"])
 
-    texts = [read_gp(path) for path in args.inputs]
-    debris_texts = [read_gp(path) for path in args.debris]
+
+def export(texts, debris_texts=(), out_dir=OUT_PATH.parent, sources=(), extra=None):
+    """Write <out_dir>/leo_objects.json from GP CSV texts; returns the number of objects written."""
     debris_ids = {fields["NORAD_CAT_ID"] for fields in load_records(debris_texts)[0]}
-    records, sats = load_records(texts + debris_texts)
+    records, sats = load_records(list(texts) + list(debris_texts))
 
     out = []
     for fields, sat in zip(records, sats):
@@ -100,21 +136,37 @@ def main():
         apogee = sat.alta * sat.radiusearthkm
         if orbit_class(perigee, apogee, period_min, sat.ecco) != "LEO":
             continue
-        norad_id = fields["NORAD_CAT_ID"]
-        group = "Debris" if norad_id in debris_ids else constellation(norad_id, fields["OBJECT_NAME"])
+        group = group_of(fields, debris_ids)
         rec = millisecond_omm(fields)
-        out.append([group, [rec[k] for k in OMM_FIELDS]])
+        out.append([group, [rec[k] for k in OMM_FIELDS], *validity_window_ms(fields)])
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "sources": [Path(p).name for p in args.inputs + args.debris],
+        "sources": list(sources),
         "omm_fields": OMM_FIELDS,
-        "objects": out,   # [group, [OMM values in omm_fields order]]
+        "validity_days": VALIDITY_DAYS,
+        # The simulation clock is limited to this range (the newest epochs +- VALIDITY_DAYS).
+        "clock_range_ms": [max(row[3] for row in out) - 2 * VALIDITY_DAYS * DAY_MS, max(row[3] for row in out)],
+        **(extra or {}),
+        "objects": out,   # [group, [OMM values in omm_fields order], valid_from_ms, valid_to_ms]
     }
-    OUT_PATH.write_text(json.dumps(payload, separators=(",", ":")))
+    out_path = out_dir / "leo_objects.json"
+    out_path.write_text(json.dumps(payload, separators=(",", ":")))
     n_debris = sum(1 for row in out if row[0] == "Debris")
-    print(f"Wrote {len(out)} LEO objects ({len(out) - n_debris} satellites, {n_debris} debris) to {OUT_PATH}")
+    print(f"Wrote {len(out)} LEO objects ({len(out) - n_debris} satellites/rocket bodies, {n_debris} debris) to {out_path}")
+    return len(out)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("inputs", nargs="*", default=["data/raw/active_gp.csv"], help="GP CSV files of satellites")
+    parser.add_argument("--debris", nargs="+", default=[], help="GP CSV files of debris objects")
+    parser.add_argument("--out-dir", default=str(OUT_PATH.parent), help="output directory (default app/data)")
+    args = parser.parse_args()
+    export([read_gp(p) for p in args.inputs], [read_gp(p) for p in args.debris], args.out_dir,
+           [Path(p).name for p in args.inputs + args.debris])
 
 
 if __name__ == "__main__":

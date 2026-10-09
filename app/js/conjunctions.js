@@ -1,22 +1,25 @@
 // Conjunction screening results (from src/screen_conjunctions.py): the critical-events panel with
 // live countdowns, and an analysis mode that shows both objects, their orbits, the TCA point and
-// their live separation.
+// their live separation. When the clock leaves the screened window, the window starting at the
+// current time is requested from src/server.py (/api/screen) and replaces the loaded one.
 
 import * as THREE from 'three';
 import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
-import { makeSatrec } from './data.js';
+import { DATASET, dataUrl, makeSatrec } from './data.js';
+import { createManeuverView } from './maneuverView.js';
 
 const sat = window.satellite;
 const COLOR_A = 0xffd84d;
 const COLOR_B = 0xff4d4d;
 const MAX_ROWS = 100;
 const LEAD_MS = 10 * 60000;   // analysis starts 10 minutes before TCA
+const REQUEST_DELAY_MS = 600;  // wait this long outside the window before requesting (skips clock jumps in between)
 const $ = (id) => document.getElementById(id);
 
 export async function loadConjunctions() {
   try {
-    const res = await fetch('data/conjunctions.json');
+    const res = await fetch(dataUrl('conjunctions.json'));
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -42,36 +45,49 @@ const RISK_ORDER = { red: 0, yellow: 1, green: 2 };
 const DAY_MS = 86400000;
 const shortDate = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 
-export function createConjunctionView({ data, scene, camera, sats, state, setSpeed, onAnalyze }) {
-  // Rows are compact arrays; names and groups come from the satellite list.
+export function createConjunctionView({ data: initialData, scene, camera, sats, state, setSpeed, onAnalyze, clockRange }) {
   const satByNorad = new Map(sats.map((s) => [s.norad, s]));
-  const events = data.rows
-    .map((row) => Object.fromEntries(data.fields.map((f, k) => [f, row[k]])))
-    .filter((e) => satByNorad.has(e.norad_1) && satByNorad.has(e.norad_2))
-    .sort((a, b) => a.tca_ms - b.tca_ms);
-  events.forEach((e, idx) => {
-    const a = satByNorad.get(e.norad_1), b = satByNorad.get(e.norad_2);
-    Object.assign(e, { idx, name_1: a.name, group_1: a.group, name_2: b.name, group_2: b.group,
-      tca_utc: new Date(e.tca_ms).toISOString() });
-  });
-  const windowStartMs = Date.parse(data.window_start_utc);
-  const windowEndMs = windowStartMs + data.window_hours * 3600000;
+  let data = null, events = [], windowStartMs = 0, windowEndMs = 0, nDays = 0;
+
+  // Replace the loaded screening window. Rows are compact arrays; names and groups come from the
+  // satellite list.
+  function setData(d) {
+    data = d;
+    events = d.rows
+      .map((row) => Object.fromEntries(d.fields.map((f, k) => [f, row[k]])))
+      .filter((e) => satByNorad.has(e.norad_1) && satByNorad.has(e.norad_2))
+      .sort((a, b) => a.tca_ms - b.tca_ms);
+    events.forEach((e, idx) => {
+      const a = satByNorad.get(e.norad_1), b = satByNorad.get(e.norad_2);
+      Object.assign(e, { idx, name_1: a.name, group_1: a.group, name_2: b.name, group_2: b.group,
+        tca_utc: new Date(e.tca_ms).toISOString() });
+    });
+    windowStartMs = Date.parse(d.window_start_utc);
+    windowEndMs = windowStartMs + d.window_hours * 3600000;
+    nDays = Math.ceil(d.window_hours / 24);
+
+    const c = d.counts ?? {};
+    $('conjSummary').textContent =
+      `${d.n_objects.toLocaleString()} objects screened for ` +
+      `${d.window_hours >= 48 ? `${+(d.window_hours / 24).toFixed(1)} days` : `${d.window_hours} h`} from ` +
+      `${d.window_start_utc.slice(0, 16).replace('T', ' ')} UTC · ` +
+      `${((c.red ?? 0) + (c.yellow ?? 0) + (c.green ?? 0)).toLocaleString()} approaches < ${d.screen_km} km ` +
+      `(${(c.red ?? 0).toLocaleString()} critical, ${(c.yellow ?? 0).toLocaleString()} watch)`;
+    $('conjNote').textContent =
+      `Pc uses an assumed covariance (TLEs have none) that grows with element age, and a ${d.hbr_m} m ` +
+      `combined hard-body radius.` + (d.intra_max_age_days
+        ? ` Same-constellation pairs (e.g. Starlink–Starlink) are only screened while both element sets are at most ` +
+          `${d.intra_max_age_days} days old: they manoeuvre to keep their spacing, which TLEs cannot predict further ahead.`
+        : '');
+    lastIds = '';
+    renderDays();
+    renderList();
+    renderCheck();
+  }
+  const covered = (t) => data !== null && t >= windowStartMs && t < windowEndMs;
 
   // ---------- panel ----------
   $('conj').style.display = 'block';
-  const c = data.counts ?? {};
-  $('conjSummary').textContent =
-    `${data.n_objects.toLocaleString()} objects screened for ` +
-    `${data.window_hours >= 48 ? `${data.window_hours / 24} days` : `${data.window_hours} h`} from ` +
-    `${data.window_start_utc.slice(0, 16).replace('T', ' ')} UTC · ` +
-    `${((c.red ?? 0) + (c.yellow ?? 0) + (c.green ?? 0)).toLocaleString()} approaches < ${data.screen_km} km ` +
-    `(${(c.red ?? 0).toLocaleString()} critical, ${(c.yellow ?? 0).toLocaleString()} watch)`;
-  $('conjNote').textContent =
-    `Pc uses an assumed covariance (TLEs have none) that grows with element age, and a ${data.hbr_m} m ` +
-    `combined hard-body radius.` + (data.intra_cutoff_hours
-      ? ` Same-constellation pairs (e.g. Starlink–Starlink) are shown for the first ${data.intra_cutoff_hours} h ` +
-        `only: they manoeuvre to keep their spacing, which TLEs cannot predict further ahead.`
-      : '');
 
   const filterEl = $('conjFilter'), sortEl = $('conjSort'), hideSameEl = $('conjHideSame'), listEl = $('conjList');
   const rangeEl = $('conjRange');
@@ -108,14 +124,16 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     highlightDay();
 
     const nextRed = events.find((e) => e.risk === 'red' && e.tca_ms >= state.simTime && !(hideSameEl.checked && sameConstellation(e)));
-    $('conjNext').innerHTML = nextRed
-      ? `Next critical in <b>${formatDuration(nextRed.tca_ms - state.simTime)}</b>: ${escapeHtml(nextRed.name_1)} × ${escapeHtml(nextRed.name_2)}`
-      : 'No critical events left in the screening window';
+    $('conjNext').innerHTML = !covered(state.simTime)
+      ? 'This time is outside the screened window'
+      : nextRed
+        ? `Next critical in <b>${formatDuration(nextRed.tca_ms - state.simTime)}</b>: ${escapeHtml(nextRed.name_1)} × ${escapeHtml(nextRed.name_2)}`
+        : 'No critical events left in the screened window';
 
     if (ids === lastIds) {   // same rows: only refresh the countdowns
-      for (const row of listEl.children) {
+      for (const row of listEl.querySelectorAll('.conj-row')) {
         const e = events[Number(row.dataset.idx)];
-        row.querySelector('.when').textContent = `in ${formatDuration(e.tca_ms - state.simTime)}`;
+        if (e) row.querySelector('.when').textContent = `in ${formatDuration(e.tca_ms - state.simTime)}`;
       }
       return;
     }
@@ -126,10 +144,9 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
         <div class="conj-names">${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
         <div class="conj-meta"><span class="when">in ${formatDuration(e.tca_ms - state.simTime)}</span>
           · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}</div>
-      </div>`).join('') || '<div class="muted small">No events match.</div>';
+      </div>`).join('') || `<div class="muted small">${covered(state.simTime) ? 'No events match.' : 'No screening for this time yet.'}</div>`;
   }
   // ---------- events per day (click a day to fast-forward there) ----------
-  const nDays = Math.ceil(data.window_hours / 24);
   const daysEl = $('conjDays');
   // Each bar covers 24 h from the screening start, so label it with its exact range.
   const stamp = (ms) => `${shortDate(ms)} ${new Date(ms).toISOString().slice(11, 16)}`;
@@ -177,7 +194,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
 
   function renderCheck() {
     const el = $('infoConj');
-    if (!focus) { el.innerHTML = ''; return; }
+    if (!focus || !data) { el.innerHTML = ''; return; }
     const mine = events.filter((e) => involves(e, focus.norad) && e.tca_ms >= state.simTime);
     const debris = mine.filter((e) => e.debris);
     const others = mine.filter((e) => !e.debris);
@@ -185,9 +202,9 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     const otherLine = others.length
       ? `${others.length} critical/watch conjunction${others.length > 1 ? 's' : ''} with other satellites.`
       : 'No critical/watch conjunctions with other satellites.';
-    if (state.simTime > windowEndMs) {
-      el.innerHTML = `<div class="check yellow"><div class="title">Outside the screening window</div>
-        Re-run src/screen_conjunctions.py to check times after ${until} UTC.</div>`;
+    if (!covered(state.simTime)) {
+      el.innerHTML = `<div class="check yellow"><div class="title">This time is not screened yet</div>
+        ${status.loading ? 'Screening is running; the check appears when it finishes.' : 'See the conjunction panel.'}</div>`;
       return;
     }
     if (!debris.length) {
@@ -233,8 +250,15 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
 
   let active = null, recA = null, recB = null;
   const tcaPoint = new THREE.Vector3();
+  const maneuver = createManeuverView({
+    scene, state, satByNorad, setSpeed,
+    onPlanChange: () => { lastDetail = 0; },
+    notBefore: () => windowStartMs,          // plan as if decided when the conjunction was screened
+  });
+  $('conjManeuver').onclick = () => { if (active) maneuver.request(active); };
 
   function analyze(e, focus = true) {
+    if (!maneuver.forEvent(e)) maneuver.clear();
     active = e;
     recA = makeSatrec(satByNorad.get(e.norad_1));
     recB = makeSatrec(satByNorad.get(e.norad_2));
@@ -260,6 +284,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   }
 
   function close() {
+    maneuver.clear();
     active = null;
     group.visible = false;
     orbitA.hide();
@@ -269,24 +294,85 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   }
   $('conjClose').onclick = close;
   $('conjLead').onclick = () => { if (active) { state.simTime = active.tca_ms - LEAD_MS; setSpeed(10); } };
-  $('conjTca').onclick = () => { if (active) { state.simTime = active.tca_ms; setSpeed(0); } };
+  $('conjTca').onclick = () => {
+    if (active) { state.simTime = maneuver.summary()?.tca_after_ms ?? active.tca_ms; setSpeed(0); }
+  };
 
   // ---------- per-frame update ----------
+  // ---------- on-demand screening (src/server.py) ----------
+  const status = { loading: false, apiMissing: false, failedKey: null, outSince: null };
+  const statusEl = $('conjStatus');
+  const spanEl = $('conjSpan');
+  const fmtUtc = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+  function showStatus(html, kind = '') {
+    statusEl.className = kind;
+    statusEl.innerHTML = html;
+  }
+
+  async function requestScreening(timeMs) {
+    const startMs = Math.floor(timeMs / 3600000) * 3600000;
+    const hours = Number(spanEl.value);
+    const key = `${startMs}:${hours}`;
+    if (status.loading || key === status.failedKey) return;
+    status.loading = true;
+    showStatus(`<span class="spinner"></span>Screening ${hours >= 48 ? `${hours / 24} days` : `${hours} h`} from ` +
+      `${fmtUtc(startMs)} UTC… (up to ${Math.round(hours / 24 * 45 + 20)} s; dates screened before load instantly)`, 'loading');
+    try {
+      const res = await fetch(`api/screen?start=${new Date(startMs).toISOString()}&hours=${hours}` +
+        (DATASET ? `&dataset=${encodeURIComponent(DATASET)}` : ''));
+      if (res.status === 404 || res.status === 501) {
+        status.apiMissing = true;
+        showStatus('This time is outside the screened window. Start the app with <code>./run.sh</code> ' +
+          '(or <code>python3 src/server.py</code>) to screen any date on demand.', 'warn');
+      } else if (!res.ok) {
+        status.failedKey = key;
+        showStatus(escapeHtml((await res.json().catch(() => ({}))).error ?? `Screening failed (HTTP ${res.status}).`), 'warn');
+      } else {
+        setData(await res.json());
+        showStatus('');
+      }
+    } catch {
+      status.failedKey = key;
+      showStatus('The simulation server is not reachable; restart it with <code>./run.sh --serve-only</code>.', 'warn');
+    } finally {
+      status.loading = false;
+    }
+  }
+  $('conjScreenHere').onclick = () => { status.failedKey = null; requestScreening(state.simTime); };
+  spanEl.onchange = () => { status.failedKey = null; };
+
+  // Request the window for the current time once the clock has stayed outside the loaded one.
+  function ensureCoverage(now) {
+    const t = state.simTime;
+    const inRange = !clockRange || (t >= clockRange[0] && t <= clockRange[1]);
+    if (covered(t) || !inRange || status.apiMissing) {
+      status.outSince = null;
+      return;
+    }
+    status.outSince ??= now;
+    if (now - status.outSince > REQUEST_DELAY_MS) requestScreening(t);
+  }
+
   let lastList = 0, lastDetail = 0;
   function update(prevSimTime) {
     const now = performance.now();
-    if (now - lastList > 400) { lastList = now; renderList(); renderCheck(); }
+    if (now - lastList > 400) { lastList = now; renderList(); renderCheck(); ensureCoverage(now); }
     if (!active) return;
 
-    // Pause exactly at TCA when the clock runs through it.
-    if (prevSimTime < active.tca_ms && state.simTime >= active.tca_ms && state.speed > 0 && $('conjAutoPause').checked) {
-      state.simTime = active.tca_ms;
+    // Pause exactly at TCA when the clock runs through it (the manoeuvred TCA while a plan is flown).
+    const tcaMs = maneuver.summary()?.tca_after_ms ?? active.tca_ms;
+    if (prevSimTime < tcaMs && state.simTime >= tcaMs && state.speed > 0 && $('conjAutoPause').checked) {
+      state.simTime = tcaMs;
       setSpeed(0);
     }
 
     const date = new Date(state.simTime);
-    const pa = sat.propagate(recA, date)?.position, pb = sat.propagate(recB, date)?.position;
+    let pa = sat.propagate(recA, date)?.position, pb = sat.propagate(recB, date)?.position;
     if (!pa || !pb) return;
+    // While a suggested manoeuvre is flown, the manoeuvring satellite follows its new path.
+    const shift = (p, o) => (o ? { x: p.x + o[0], y: p.y + o[1], z: p.z + o[2] } : p);
+    pa = shift(pa, maneuver.offset(active.norad_1, state.simTime));
+    pb = shift(pb, maneuver.offset(active.norad_2, state.simTime));
     toScene(pa.x, pa.y, pa.z, markerA.position);
     toScene(pb.x, pb.y, pb.z, markerB.position);
     sepGeometry.attributes.position.setXYZ(0, markerA.position.x, markerA.position.y, markerA.position.z);
@@ -312,10 +398,24 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
       ['Altitude', `${e.altitude_km.toFixed(0)} km`],
       ['Collision probability', formatPc(e.pc)],
     ];
+    const plan = maneuver.summary();
+    if (plan) {
+      rows.splice(3, 0, ['With manoeuvre', `<b>${(plan.miss_after_km * 1000).toFixed(0)} m</b> miss · Pc ${formatPc(plan.pc_after)}`]);
+    } else if (maneuver.warning()) {
+      rows.splice(1, 0, ['Avoidance', '<span class="badge-text red">no safe manoeuvre</span>']);
+    }
     $('conjDetailBody').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   }
 
-  renderDays();
-  renderList();
-  return { update, close, setFocus };
+  // Analyse the screened pass of two objects closest to nearMs (used by the replay's "Go to collision").
+  function analyzePair(n1, n2, nearMs) {
+    const passes = events.filter((e) => (e.norad_1 === n1 && e.norad_2 === n2) || (e.norad_1 === n2 && e.norad_2 === n1));
+    if (!passes.length) return false;
+    analyze(passes.reduce((a, b) => (Math.abs(b.tca_ms - nearMs) < Math.abs(a.tca_ms - nearMs) ? b : a)));
+    return true;
+  }
+
+  if (initialData) setData(initialData);
+  else showStatus('No screening loaded yet.', 'warn');
+  return { update, close, setFocus, analyzePair };
 }

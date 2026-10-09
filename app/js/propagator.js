@@ -16,5 +16,10 @@ export function startPropagator(sats, state, { onReady, onState }) {
       requestStep();
     }
   };
-  worker.postMessage({ type: 'init', omms: sats.map(s => s.omm) });
+  worker.postMessage({
+    type: 'init',
+    omms: sats.map(s => s.omm),
+    validFrom: Float64Array.from(sats, s => s.validFrom),
+    validTo: Float64Array.from(sats, s => s.validTo),
+  });
 }

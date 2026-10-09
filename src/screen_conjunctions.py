@@ -14,17 +14,19 @@ Pipeline:
 Pairs with relative speed below MIN_REL_SPEED_KM_S (formation flying, e.g. freshly launched
 trains) are skipped: the short-encounter Pc model does not apply to them.
 
-Pairs inside one actively managed constellation (e.g. Starlink-Starlink) are trusted only for the
-first INTRA_CUTOFF_HOURS: those satellites manoeuvre constantly to keep their spacing, which TLEs
-cannot predict, so later predictions of their relative phasing are spurious (in a 7-day run their
-sub-1 km events grew from ~900 on day 1 to ~9,500 on day 6, while all other pairings stayed flat).
-They stay in the CSV (flag intra_constellation) but are left out of the counts and the app file.
+Pairs inside one actively managed constellation (e.g. Starlink-Starlink) are only screened while both
+element sets are at most INTRA_MAX_AGE_DAYS old: those satellites manoeuvre constantly to keep their
+spacing, which TLEs cannot predict, so older predictions of their relative phasing are spurious (in a
+7-day run their sub-1 km events grew from ~900 on day 1 to ~9,500 on day 6, while all other pairings
+stayed flat). The rule follows the data's age, so it holds for any window start.
 
-Outputs:
+Outputs (for --dataset history/<event>: app/data/history/<event>/ and data/history/<event>/):
   data/conjunctions_latest.csv (+ timestamped copy): every event under --screen-km
   app/data/conjunctions.json: red and yellow events, plus every event involving debris
 
-The window is split into day-long segments screened in parallel worker processes.
+The window is split into segments screened in parallel worker processes. Each object is only used
+inside its validity window (from leo_objects.json). The same code serves on-demand requests from
+src/server.py (any start date inside the clock range).
 
 Usage:
     python src/screen_conjunctions.py                     # 7 days from now
@@ -48,9 +50,17 @@ from sgp4 import omm
 from sgp4.api import Satrec, SatrecArray, jday
 
 ROOT = Path(__file__).resolve().parent.parent
-OBJECTS_PATH = ROOT / "app" / "data" / "leo_objects.json"
-APP_OUT = ROOT / "app" / "data" / "conjunctions.json"
+APP_DATA = ROOT / "app" / "data"
+OBJECTS_PATH = APP_DATA / "leo_objects.json"
+APP_OUT = APP_DATA / "conjunctions.json"
 DATA_DIR = ROOT / "data"
+
+
+def dataset_dirs(dataset=""):
+    """(app data dir, csv output dir) for a dataset: "" = live data, "history/<event>" = a past event."""
+    if dataset and (".." in Path(dataset).parts or Path(dataset).is_absolute()):
+        raise ValueError(f"invalid dataset {dataset!r}")
+    return APP_DATA / dataset, DATA_DIR / dataset
 
 MAX_REL_SPEED_KM_S = 16.0     # upper bound for two LEO objects (head-on)
 COARSE_KM = 15.0              # straight-line pre-filter; covers curvature error over one step
@@ -66,23 +76,40 @@ APP_FIELDS = ["tca_ms", "norad_1", "norad_2", "miss_km", "miss_radial_km", "miss
               "rel_speed_km_s", "altitude_km", "pc", "risk", "debris"]
 
 MANAGED_CONSTELLATIONS = {"Starlink", "OneWeb", "Kuiper", "Qianfan", "Guowang", "Iridium"}
-INTRA_CUTOFF_HOURS = 24
+INTRA_MAX_AGE_DAYS = 1.5
+
+
+def untrusted_intra_pair(objs, sats, a, b, t_sec, jd0, fr0):
+    """Same managed constellation and either element set older than INTRA_MAX_AGE_DAYS at t_sec."""
+    ga, gb = objs[a]["group"], objs[b]["group"]
+    if ga != gb or ga not in MANAGED_CONSTELLATIONS:
+        return False
+    oldest = max(t_sec - epoch_seconds(sats[a], jd0 + fr0), t_sec - epoch_seconds(sats[b], jd0 + fr0)) / 86400
+    return oldest > INTRA_MAX_AGE_DAYS
 
 PC_RED = 1e-4
 PC_YELLOW = 1e-5
 
 
-def load_objects():
+def load_objects(path=OBJECTS_PATH):
     """The simulation's objects, initialised from the same OMM records the browser uses."""
-    data = json.loads(OBJECTS_PATH.read_text())
+    data = json.loads(Path(path).read_text())
     objs, sats = [], []
-    for group, values in data["objects"]:
+    for group, values, *_ in data["objects"]:
         fields = dict(zip(data["omm_fields"], values))
         sat = Satrec()
         omm.initialize(sat, {k: str(v) for k, v in fields.items()})
         sats.append(sat)
         objs.append({"norad_id": fields["NORAD_CAT_ID"], "name": fields["OBJECT_NAME"], "group": group})
     return objs, sats
+
+
+def load_validity(path=OBJECTS_PATH):
+    """(valid_from_ms, valid_to_ms) arrays aligned with load_objects(), and the clock range."""
+    data = json.loads(Path(path).read_text())
+    rows = data["objects"]
+    return (np.array([r[2] for r in rows], dtype=np.float64), np.array([r[3] for r in rows], dtype=np.float64),
+            tuple(data["clock_range_ms"]))
 
 
 def epoch_seconds(sat, t0_jd):
@@ -95,8 +122,9 @@ def sgp4_at(sat, jd0, fr0, sec):
     return err, np.array(r), np.array(v)
 
 
-def coarse_screen(sats, jd0, fr0, k_start, k_end, dt):
-    """Candidate encounters between grid steps k_start..k_end-1 as arrays (i, j, t_seconds, approx_miss_km)."""
+def coarse_screen(sats, jd0, fr0, k_start, k_end, dt, valid=None, t0_ms=0.0):
+    """Candidate encounters between grid steps k_start..k_end-1 as arrays (i, j, t_seconds, approx_miss_km).
+    valid = (valid_from_ms, valid_to_ms): objects outside their validity window are ignored."""
     n = len(sats)
     sat_array = SatrecArray(sats)
     radius = MAX_REL_SPEED_KM_S * dt / 2 + COARSE_KM
@@ -107,8 +135,12 @@ def coarse_screen(sats, jd0, fr0, k_start, k_end, dt):
         m = min(CHUNK_STEPS, k_end - start)
         secs = (start + np.arange(m)) * dt
         err, r, v = sat_array.sgp4(np.full(m, jd0), fr0 + secs / 86400.0)
+        bad = err != 0
+        if valid is not None:
+            t_ms = t0_ms + secs * 1000.0
+            bad |= (t_ms[None, :] < valid[0][:, None]) | (t_ms[None, :] > valid[1][:, None])
         for k in range(m):
-            pos = np.where((err[:, k] != 0)[:, None], far, r[:, k, :])
+            pos = np.where(bad[:, k][:, None], far, r[:, k, :])
             pairs = cKDTree(pos).query_pairs(radius, output_type="ndarray")
             if not len(pairs):
                 continue
@@ -227,23 +259,44 @@ def risk_level(pc, miss_km):
 _WORKER = {}
 
 
-def screen_segment(segment):
+def _init_worker(path):
+    """Pool initializer: each worker process loads the objects once."""
+    objs, sats = load_objects(path)
+    valid_from, valid_to, _ = load_validity(path)
+    _WORKER.update(objs=objs, sats=sats, valid=(valid_from, valid_to))
+
+
+def make_pool(workers, objects_path=OBJECTS_PATH):
+    # "spawn" is safe from threaded parents (src/server.py); workers load the objects in _init_worker.
+    return mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(str(objects_path),))
+
+
+def screen_segment(task):
     """Screen grid steps [k_start, k_end) and return refined events (runs in a worker process)."""
-    objs, sats, t0, args = _WORKER["objs"], _WORKER["sats"], _WORKER["t0"], _WORKER["args"]
+    t0_iso, k_start, k_end, p = task
+    objs, sats, valid = _WORKER["objs"], _WORKER["sats"], _WORKER["valid"]
+    t0 = datetime.fromisoformat(t0_iso)
+    t0_ms = t0.timestamp() * 1000
     jd0, fr0 = jday(t0.year, t0.month, t0.day, t0.hour, t0.minute, t0.second)
-    i, j, t, d = coarse_screen(sats, jd0, fr0, *segment, args.step)
+    i, j, t, d = coarse_screen(sats, jd0, fr0, k_start, k_end, p["step"], valid, t0_ms)
     # The straight-line estimate is within ~1 km of the exact miss, so far candidates can be skipped.
-    near = d < args.screen_km + 3
-    candidates = dedupe(i[near], j[near], t[near], d[near], args.step)
+    near = d < p["screen_km"] + 3
+    candidates = dedupe(i[near], j[near], t[near], d[near], p["step"])
 
     events = []
+    skipped_intra = 0
     for a, b, tc, _ in candidates:
+        if untrusted_intra_pair(objs, sats, a, b, float(tc), jd0, fr0):
+            skipped_intra += 1
+            continue
         res = refine(sats[a], sats[b], jd0, fr0, float(tc))
         if res is None:
             continue
         tca, ri, vi, rj, vj = res
         miss = float(np.linalg.norm(rj - ri))
-        if miss >= args.screen_km or not 0 <= tca <= args.hours * 3600:
+        tca_ms = t0_ms + tca * 1000
+        if miss >= p["screen_km"] or not 0 <= tca <= p["hours"] * 3600 \
+                or not (valid[0][a] <= tca_ms <= valid[1][a] and valid[0][b] <= tca_ms <= valid[1][b]):
             continue
         oa, ob = objs[a], objs[b]
         age_a = (tca - epoch_seconds(sats[a], jd0 + fr0)) / 86400
@@ -252,7 +305,7 @@ def screen_segment(segment):
             ri, vi, rj, vj,
             covariance(ri, vi, age_a, oa["group"] == "Debris"),
             covariance(rj, vj, age_b, ob["group"] == "Debris"),
-            args.hbr_m / 1000,
+            p["hbr_m"] / 1000,
         )
         miss_rtn = rtn_basis(ri, vi).T @ (rj - ri)
         tca_dt = t0 + timedelta(seconds=tca)
@@ -272,37 +325,28 @@ def screen_segment(segment):
             "debris": "Debris" in (oa["group"], ob["group"]),
             "intra_constellation": oa["group"] == ob["group"] and oa["group"] in MANAGED_CONSTELLATIONS,
         })
-    return events
+    return events, skipped_intra
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--hours", type=float, default=168, help="screening window length (default 168 = 7 days)")
-    parser.add_argument("--workers", type=int, default=min(7, mp.cpu_count()), help="parallel worker processes")
-    parser.add_argument("--step", type=float, default=20, help="coarse time step in seconds (default 20)")
-    parser.add_argument("--screen-km", type=float, default=5, help="keep events with miss distance below this (default 5)")
-    parser.add_argument("--hbr-m", type=float, default=20, help="combined hard-body radius in metres (default 20)")
-    parser.add_argument("--start", help="window start, ISO 8601 UTC (default: now)")
-    args = parser.parse_args()
+DEFAULT_PARAMS = {"step": 20.0, "screen_km": 5.0, "hbr_m": 20.0}
 
-    started = time.time()
-    t0 = (datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start
-          else datetime.now(timezone.utc)).replace(microsecond=0)
-    steps = int(args.hours * 3600 / args.step) + 1
-    seg_steps = int(24 * 3600 / args.step)
-    segments = [(k, min(k + seg_steps, steps)) for k in range(0, steps, seg_steps)]
 
-    objs, sats = load_objects()
-    print(f"Screening {len(sats)} objects, {args.hours:g} h from {t0.isoformat()} in {args.step:g} s steps, "
-          f"{len(segments)} segment(s) on {min(args.workers, len(segments))} worker(s)")
-
-    # Workers are forked after these globals are set, so each one inherits the parsed objects.
-    _WORKER.update(objs=objs, sats=sats, t0=t0, args=args)
-    with mp.get_context("fork").Pool(min(args.workers, len(segments))) as pool:
-        results = []
-        for n_done, seg_events in enumerate(pool.imap_unordered(screen_segment, segments), 1):
-            results.extend(seg_events)
-            print(f"  {n_done}/{len(segments)} segments done ({time.time() - started:.0f} s)", flush=True)
+def run_screening(pool, workers, t0, hours, params=None, progress=None):
+    """Screen [t0, t0 + hours] on the pool. Returns (events, trusted, counts); see module docstring."""
+    p = {**DEFAULT_PARAMS, **(params or {}), "hours": hours}
+    steps = int(hours * 3600 / p["step"]) + 1
+    # Enough segments to keep every worker busy, none shorter than one hour of steps.
+    n_seg = max(workers, math.ceil(hours / 24))
+    seg_steps = max(int(3600 / p["step"]), math.ceil(steps / n_seg))
+    t0_iso = t0.isoformat()
+    tasks = [(t0_iso, k, min(k + seg_steps, steps), p) for k in range(0, steps, seg_steps)]
+    results = []
+    skipped_intra = 0
+    for n_done, (seg_events, seg_skipped) in enumerate(pool.imap_unordered(screen_segment, tasks), 1):
+        results.extend(seg_events)
+        skipped_intra += seg_skipped
+        if progress:
+            progress(n_done, len(tasks))
 
     # An encounter on a segment boundary can be found by both neighbours: keep one.
     results.sort(key=lambda e: (e["norad_1"], e["norad_2"], e["tca_ms"]))
@@ -315,40 +359,76 @@ def main():
         events.append(e)
     events.sort(key=lambda e: e["tca_ms"])
 
-    cutoff_ms = int((t0 + timedelta(hours=INTRA_CUTOFF_HOURS)).timestamp() * 1000)
-    trusted = [e for e in events if not (e["intra_constellation"] and e["tca_ms"] > cutoff_ms)]
-    counts = {level: sum(1 for e in trusted if e["risk"] == level) for level in ("red", "yellow", "green")}
-    counts["debris"] = sum(1 for e in trusted if e["debris"])
-    counts["intra_after_cutoff"] = len(events) - len(trusted)
-    print(f"{len(events)} conjunctions under {args.screen_km:g} km; {len(trusted)} after dropping "
-          f"intra-constellation pairs beyond {INTRA_CUTOFF_HOURS} h "
-          f"(red {counts['red']}, yellow {counts['yellow']}, green {counts['green']}) in {time.time() - started:.0f} s")
+    counts = {level: sum(1 for e in events if e["risk"] == level) for level in ("red", "yellow", "green")}
+    counts["debris"] = sum(1 for e in events if e["debris"])
+    counts["intra_skipped_candidates"] = skipped_intra
+    return events, events, counts
 
-    stamp = t0.strftime("%Y%m%dT%H%M%SZ")
-    DATA_DIR.mkdir(exist_ok=True)
-    for path in (DATA_DIR / f"conjunctions_{stamp}.csv", DATA_DIR / "conjunctions_latest.csv"):
-        with path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(events[0].keys()) if events else ["tca_utc"])
-            writer.writeheader()
-            writer.writerows(events)
 
-    APP_OUT.write_text(json.dumps({
+def app_payload(t0, hours, trusted, counts, n_objects, params=None):
+    """The JSON the simulation loads (app/data/conjunctions.json or the server's /api/screen)."""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    return {
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "window_start_utc": t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "window_hours": args.hours,
-        "step_s": args.step,
-        "screen_km": args.screen_km,
-        "hbr_m": args.hbr_m,
-        "n_objects": len(sats),
+        "window_hours": hours,
+        "step_s": p["step"],
+        "screen_km": p["screen_km"],
+        "hbr_m": p["hbr_m"],
+        "n_objects": n_objects,
         "thresholds": {"pc_red": PC_RED, "pc_yellow": PC_YELLOW},
         "counts": counts,
-        "intra_cutoff_hours": INTRA_CUTOFF_HOURS,
+        "intra_max_age_days": INTRA_MAX_AGE_DAYS,
         "covariance_model": "assumed RTN sigma (km) = [0.1, 0.5, 0.2] + [0.1, 1.5, 0.1] * element age (days); debris x2",
         # Compact rows; names and groups are looked up from leo_objects.json by NORAD ID.
         "fields": APP_FIELDS,
         "rows": [[e[f] for f in APP_FIELDS] for e in trusted if e["risk"] != "green" or e["debris"]],
-    }, separators=(",", ":")))
-    print(f"Wrote data/conjunctions_latest.csv and {APP_OUT.relative_to(ROOT)}")
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--hours", type=float, default=168, help="screening window length (default 168 = 7 days)")
+    parser.add_argument("--workers", type=int, default=min(7, mp.cpu_count()), help="parallel worker processes")
+    parser.add_argument("--step", type=float, default=20, help="coarse time step in seconds (default 20)")
+    parser.add_argument("--screen-km", type=float, default=5, help="keep events with miss distance below this (default 5)")
+    parser.add_argument("--hbr-m", type=float, default=20, help="combined hard-body radius in metres (default 20)")
+    parser.add_argument("--start", help="window start, ISO 8601 UTC (default: now)")
+    parser.add_argument("--dataset", default="", help='"" for the live data, or history/<event> (see src/history.py)')
+    args = parser.parse_args()
+    app_dir, csv_dir = dataset_dirs(args.dataset)
+    objects_path = app_dir / "leo_objects.json"
+
+    started = time.time()
+    t0 = (datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start
+          else datetime.now(timezone.utc)).replace(microsecond=0)
+    lo, hi = load_validity(objects_path)[2]
+    if not lo <= t0.timestamp() * 1000 <= hi:
+        fmt = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
+        raise SystemExit(f"Start {t0:%Y-%m-%d %H:%M} UTC is outside the loaded elements' range ({fmt(lo)} - {fmt(hi)} UTC).")
+    params = {"step": args.step, "screen_km": args.screen_km, "hbr_m": args.hbr_m}
+    n_objects = len(load_objects(objects_path)[0])
+    print(f"Screening {n_objects} objects, {args.hours:g} h from {t0.isoformat()} in {args.step:g} s steps "
+          f"on {args.workers} worker(s)")
+    with make_pool(args.workers, objects_path) as pool:
+        events, trusted, counts = run_screening(
+            pool, args.workers, t0, args.hours, params,
+            progress=lambda n, total: print(f"  {n}/{total} segments done ({time.time() - started:.0f} s)", flush=True))
+    print(f"{len(events)} conjunctions under {args.screen_km:g} km "
+          f"(red {counts['red']}, yellow {counts['yellow']}, green {counts['green']}); "
+          f"{counts['intra_skipped_candidates']} same-constellation candidates with elements older than "
+          f"{INTRA_MAX_AGE_DAYS} days skipped; {time.time() - started:.0f} s")
+
+    stamp = t0.strftime("%Y%m%dT%H%M%SZ")
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    for path in (csv_dir / f"conjunctions_{stamp}.csv", csv_dir / "conjunctions_latest.csv"):
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(events[0].keys()) if events else ["tca_utc"])
+            writer.writeheader()
+            writer.writerows(events)
+    app_out = app_dir / "conjunctions.json"
+    app_out.write_text(json.dumps(app_payload(t0, args.hours, trusted, counts, n_objects, params), separators=(",", ":")))
+    print(f"Wrote {(csv_dir / 'conjunctions_latest.csv').relative_to(ROOT)} and {app_out.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

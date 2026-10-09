@@ -124,10 +124,9 @@ In the simulation: a per-day chart of events (click a day to jump there), a look
 (next 1 h / 6 h / 24 h / 3 days / whole window), and time controls +1 h, +1 day, +1 week, a UTC date picker, and a 6 h/s speed.
 
 Same-constellation pairs of actively managed constellations (Starlink, OneWeb, Kuiper, Qianfan, Guowang, Iridium) are
-trusted for the first 24 h only: they manoeuvre to keep their spacing, which TLEs cannot predict, and a 7-day run showed
-their sub-1 km events growing ~10x by day 6 while other pairings stayed flat. They remain in the CSV
-(`intra_constellation` column) but are left out of the counts and the app file. `data/conjunctions_latest.csv` is ~130 MB
-for 7 days and is git-ignored.
+only screened while both element sets are at most 1.5 days old: they manoeuvre to keep their spacing, which TLEs cannot
+predict, and a 7-day run showed their sub-1 km events growing ~10x by day 6 while other pairings stayed flat.
+`data/conjunctions_latest.csv` is large for 7 days and is git-ignored.
 
 ## Accuracy and verification
 
@@ -159,10 +158,47 @@ assumed covariance.
 ## Running
 
 ```bash
-./run.sh               # download -> positions -> export -> 7-day screening (~5 min) -> server
-./run.sh --serve-only  # just serve the simulation with the existing data
+./run.sh               # download -> positions -> export -> 7-day screening (~4 min) -> server
+./run.sh --serve-only  # just start the server with the existing data
 ```
 
-If port 8765 is busy (for example the simulation is already running), `run.sh` uses the next free port and
-prints the URL. The Python scripts can be started with plain `python3` too: they re-run themselves with
-`.venv/bin/python` when the packages are missing (`src/_venv.py`).
+`run.sh` starts `src/server.py`, which serves the simulation and screens conjunctions **on demand for any date**:
+when the clock leaves the screened window (date picker, +1 day/week, playback), the panel requests
+`/api/screen?start=...&hours=24` (or 3/7 days) and shows the result; results are cached in `data/cache/`.
+If port 8765 is busy, the next free port is used. The Python scripts also work with plain `python3`
+(they re-run themselves with `.venv/bin/python`, see `src/_venv.py`).
+
+### Validity of the orbital data
+
+SGP4 elements are only meaningful near their epoch. Each object is shown and screened only within
+±30 days of its epoch and never before its estimated launch (`epoch - REV_AT_EPOCH / MEAN_MOTION`, checked
+against the launch year); the clock is limited to the loaded data's range (shown in the date picker) and
+playback pauses at its edges. Past dates (e.g. the 2009 Iridium 33 / Cosmos 2251 collision) need historical
+element sets.
+
+The render loop is isolated per module: an error in one part is reported once and never stops the animation.
+
+## Historical replay: could the system have predicted past collisions?
+
+`src/history.py` rebuilds the catalogue as it was before a known collision, using only element sets published
+before a cutoff (default 24 h before the event), from Space-Track's `gp_history` (free account; credentials from
+the environment, never stored), then screens and reports like the live data.
+
+```bash
+python3 src/history.py list
+SPACETRACK_USER='...' SPACETRACK_PASS='...' python3 src/history.py run iridium-cosmos-2009   # first run downloads
+python3 src/history.py run iridium-cosmos-2009 --lead-hours 6                                 # later runs use the cache
+```
+
+Open `http://127.0.0.1:8765/?dataset=history/iridium-cosmos-2009` (or pick it in the "Data" selector): the banner
+shows the prediction for 72 h / 24 h / 6 h of warning and "Go to collision" opens the analysis at TCA.
+
+| Event | Data from before | Predicted TCA (UTC) | Miss | Pc | Risk | Rank by Pc |
+| --- | --- | --- | --- | --- | --- | --- |
+| Iridium 33 × Cosmos 2251, 10 Feb 2009 (reported 16:55:59.67-.99) | 24 h | 16:55:59.806 | 584 m | 2.7e-4 | critical | 32 of 5,171 |
+| Cerise × Ariane 1 debris, 24 Jul 1996 (date only) | 24 h | 09:48:02.451 | 1,054 m | 5.5e-5 | watch | 192 of 3,120 |
+| Yunhai 1-02 × Zenit-2 debris, 18 Mar 2021 (reported 07:41) | 24 h | 07:41:19.365 | 216 m | 7.8e-5 | watch | 746 of 17,488 |
+
+For Iridium-Cosmos the result matches CelesTrak SOCRATES' own prediction from that day (584 m, 16:55:59.806).
+With 72 h of warning the Yunhai fragment had no element set yet, so that collision was not predictable then.
+Space-Track data is for your own use: `data/history/` and `app/data/history/` are git-ignored.
