@@ -23,6 +23,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import _venv  # noqa: F401  (re-runs with .venv/bin/python if packages are missing)
 import numpy as np
 from sgp4 import omm
 from sgp4.api import Satrec, SatrecArray, jday

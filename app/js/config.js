@@ -6,7 +6,7 @@ export const SCENE_UNITS_PER_KM = 1 / 1000; // 1 scene unit = 1,000 km
 
 export const LEO_MAX_ALT_KM = 2000;        // upper edge of Low Earth Orbit
 
-export const DATA_URL = 'data/leo_tle.json';
+export const DATA_URL = 'data/leo_objects.json';
 export const EARTH_TEXTURE_URL = 'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-blue-marble.jpg';
 
 export const GROUP_COLORS = {

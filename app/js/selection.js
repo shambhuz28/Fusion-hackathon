@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { EARTH_RADIUS_KM, SCENE_UNITS_PER_KM } from './config.js';
 import { elementAgeDays, perigeeApogeeKm, periodMinutes, toScene } from './orbit.js';
 import { createOrbitPath } from './orbitPath.js';
+import { makeSatrec } from './data.js';
 
 const sat = window.satellite;
 
@@ -35,7 +36,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
       return;
     }
     const s = sats[i];
-    rec = sat.twoline2satrec(s.line1, s.line2);
+    rec = makeSatrec(s);
     document.getElementById('infoName').textContent = s.name;
     document.getElementById('infoSub').textContent = `NORAD ${s.norad} · ${s.group}`;
     setVisible(true);
@@ -47,7 +48,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
   // Look from between the satellite and its orbit normal, so the whole orbit shows as a ring.
   function focusCamera() {
     const pv = sat.propagate(rec, new Date(state.simTime));
-    if (!pv.position) return;
+    if (!pv?.position) return;
     const r = toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3()).normalize();
     const v = toScene(pv.velocity.x, pv.velocity.y, pv.velocity.z, new THREE.Vector3());
     const normal = new THREE.Vector3().crossVectors(r, v).normalize();
@@ -59,7 +60,7 @@ export function createSelection({ scene, camera, renderer, points, sats, state, 
     if (!rec) return;
     const date = new Date(state.simTime);
     const pv = sat.propagate(rec, date);
-    if (!pv.position) return;
+    if (!pv?.position) return;
     const p = toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3());
     const v = toScene(pv.velocity.x, pv.velocity.y, pv.velocity.z, new THREE.Vector3());
     marker.position.copy(p);

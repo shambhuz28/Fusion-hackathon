@@ -19,7 +19,7 @@ export function createOrbitPath(color = 0xffffff, opacity = 0.75) {
     center = timeMs;
     for (let k = 0; k <= STEPS; k++) {
       const pv = sat.propagate(rec, new Date(timeMs - T / 2 + (T * k) / STEPS));
-      if (pv.position) pts.push(toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3()));
+      if (pv?.position) pts.push(toScene(pv.position.x, pv.position.y, pv.position.z, new THREE.Vector3()));
     }
     line.geometry.dispose();
     line.geometry = new THREE.BufferGeometry().setFromPoints(pts);

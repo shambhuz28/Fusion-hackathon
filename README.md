@@ -38,10 +38,10 @@ Note: `table.php?...&FORMAT=csv` returns an HTML page; the machine-readable endp
 ## 3D LEO simulation
 
 `app/` animates every LEO satellite around a rotating Earth. Each browser frame uses
-SGP4 positions (satellite.js, computed in a Web Worker for all satellites ~50 times a second).
+SGP4 positions (satellite.js 6 from full-precision OMM elements, computed in a Web Worker for all satellites ~50 times a second).
 
 ```bash
-.venv/bin/python src/export_sim_data.py          # data/raw/active_gp.csv -> app/data/leo_tle.json
+.venv/bin/python src/export_sim_data.py          # data/raw/active_gp.csv -> app/data/leo_objects.json
 .venv/bin/python src/export_sim_data.py data/raw/active_gp.csv --debris data/raw/cosmos-2251-debris_gp.csv   # + debris (red)
 python3 -m http.server 8765 -d app               # then open http://127.0.0.1:8765
 ```
@@ -61,7 +61,7 @@ App layout (`app/`):
 | `js/main.js` | Entry point: loads data, wires modules, render loop |
 | `js/config.js` | Constants: Earth radius, μ, scene scale, colours, speeds |
 | `js/state.js` | Shared state: sim time, speed, colour mode, latest SGP4 results, visible groups |
-| `js/data.js` | Loads `data/leo_tle.json` |
+| `js/data.js` | Loads `data/leo_objects.json` |
 | `js/orbit.js` | Orbit maths: ECI→scene, period, perigee/apogee, element age |
 | `js/scene.js` | Renderer, camera, controls, Earth, atmosphere, stars |
 | `js/leoBoundary.js` | 2,000 km LEO boundary shell, grid and label |
@@ -85,7 +85,7 @@ page via `src/table_html_to_csv.py`). Positions come from the GP elements:
 
 ## Conjunction screening
 
-`src/screen_conjunctions.py` screens every object in `app/data/leo_tle.json` against every other one:
+`src/screen_conjunctions.py` screens every object in `app/data/leo_objects.json` against every other one:
 
 1. SGP4 for all objects every 20 s over the window (default 24 h)
 2. KD-tree finds nearby pairs at each step; a straight-line check keeps pairs that come within 15 km
@@ -128,3 +128,41 @@ trusted for the first 24 h only: they manoeuvre to keep their spacing, which TLE
 their sub-1 km events growing ~10x by day 6 while other pairings stayed flat. They remain in the CSV
 (`intra_constellation` column) but are left out of the counts and the app file. `data/conjunctions_latest.csv` is ~130 MB
 for 7 days and is git-ignored.
+
+## Accuracy and verification
+
+All SGP4 paths use the same full-precision OMM elements from CelesTrak (not TLE text, which rounds eccentricity
+and B* and moved some fast-decaying debris by up to ~280 m). `app/data/leo_objects.json` stores epochs on whole
+milliseconds (satellite.js parses them with a JavaScript Date) with the mean anomaly compensated.
+
+```bash
+.venv/bin/python tests/verify_conjunctions.py      # ~1 min, 8 checks
+.venv/bin/python tests/verify_browser_sgp4.py      # browser SGP4 vs Python, needs Node.js
+```
+
+Last results:
+
+| Check | Result |
+| --- | --- |
+| Positions CSVs vs screener inputs, all 17,528 objects | max 0.06 m, 0.9 mm/s |
+| Raw OMM vs exported records over 7 days | median 2 mm, max 0.18 m (objects about to re-enter) |
+| Browser (satellite.js 6.0.2) vs Python, 140,204 states over 7 days | max 0.31 m, 0.36 mm/s |
+| TCA and miss distance vs dense 1 ms sampling (394 events, all days, segment boundaries, debris) | max 0.15 m, 1 ms |
+| Miss vector perpendicular to relative velocity, RTN components | within TCA rounding, 0.1 m |
+| Pc vs exact disk integral (adaptive quadrature) / vs Monte Carlo (2e7 samples) | 0.05 % (storage rounding) / within 2.4 sigma |
+| Completeness: brute force at 1 s steps, 3 windows of 20 min (start, 24 h segment boundary, day 5) | 752 / 934 / 1,776 events, 0 missing, 0 extra, 0 duplicates |
+
+These are numerical checks of the computation. The physical accuracy is limited by the data: TLE/OMM
+positions are typically good to about 1 km at epoch and degrade by 1-3 km per day, and Pc depends on the
+assumed covariance.
+
+## Running
+
+```bash
+./run.sh               # download -> positions -> export -> 7-day screening (~5 min) -> server
+./run.sh --serve-only  # just serve the simulation with the existing data
+```
+
+If port 8765 is busy (for example the simulation is already running), `run.sh` uses the next free port and
+prints the URL. The Python scripts can be started with plain `python3` too: they re-run themselves with
+`.venv/bin/python` when the packages are missing (`src/_venv.py`).

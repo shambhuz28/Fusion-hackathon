@@ -16,5 +16,5 @@ export function startPropagator(sats, state, { onReady, onState }) {
       requestStep();
     }
   };
-  worker.postMessage({ type: 'init', tles: sats.map(s => [s.line1, s.line2]) });
+  worker.postMessage({ type: 'init', omms: sats.map(s => s.omm) });
 }

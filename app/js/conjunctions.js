@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
+import { makeSatrec } from './data.js';
 
 const sat = window.satellite;
 const COLOR_A = 0xffd84d;
@@ -235,10 +236,11 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
 
   function analyze(e, focus = true) {
     active = e;
-    recA = sat.twoline2satrec(satByNorad.get(e.norad_1).line1, satByNorad.get(e.norad_1).line2);
-    recB = sat.twoline2satrec(satByNorad.get(e.norad_2).line1, satByNorad.get(e.norad_2).line2);
+    recA = makeSatrec(satByNorad.get(e.norad_1));
+    recB = makeSatrec(satByNorad.get(e.norad_2));
     const tca = new Date(e.tca_ms);
-    const pa = sat.propagate(recA, tca).position, pb = sat.propagate(recB, tca).position;
+    const pa = sat.propagate(recA, tca)?.position, pb = sat.propagate(recB, tca)?.position;
+    if (!pa || !pb) return;
     toScene((pa.x + pb.x) / 2, (pa.y + pb.y) / 2, (pa.z + pb.z) / 2, tcaPoint);
     tcaMarker.position.copy(tcaPoint);
 
@@ -283,7 +285,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     }
 
     const date = new Date(state.simTime);
-    const pa = sat.propagate(recA, date).position, pb = sat.propagate(recB, date).position;
+    const pa = sat.propagate(recA, date)?.position, pb = sat.propagate(recB, date)?.position;
     if (!pa || !pb) return;
     toScene(pa.x, pa.y, pa.z, markerA.position);
     toScene(pb.x, pb.y, pb.z, markerB.position);

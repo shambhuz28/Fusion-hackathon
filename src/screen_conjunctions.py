@@ -1,4 +1,4 @@
-"""All-vs-all conjunction screening for the objects in app/data/leo_tle.json.
+"""All-vs-all conjunction screening for the objects in app/data/leo_objects.json.
 
 Pipeline:
   1. Propagate every object with SGP4 on a fixed time grid (default 20 s steps, 24 h).
@@ -7,7 +7,8 @@ Pipeline:
      approach within that step is under COARSE_KM.
   3. Each candidate is refined with exact SGP4 states to its time of closest approach (TCA)
      and miss distance; events under --screen-km are kept.
-  4. Probability of collision (Pc) uses the 2D short-encounter method (Foster/Chan) with an
+  4. Probability of collision (Pc) uses the 2D short-encounter method (Foster/Chan, integrated
+     numerically over the hard-body disk) with an
      ASSUMED covariance, because TLEs carry none: 1-sigma RTN errors grow with element age.
 
 Pairs with relative speed below MIN_REL_SPEED_KM_S (formation flying, e.g. freshly launched
@@ -39,12 +40,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import _venv  # noqa: F401  (re-runs with .venv/bin/python if packages are missing)
 import numpy as np
 from scipy.spatial import cKDTree
+from fetch_positions import ecef_to_geodetic
+from sgp4 import omm
 from sgp4.api import Satrec, SatrecArray, jday
 
 ROOT = Path(__file__).resolve().parent.parent
-TLE_PATH = ROOT / "app" / "data" / "leo_tle.json"
+OBJECTS_PATH = ROOT / "app" / "data" / "leo_objects.json"
 APP_OUT = ROOT / "app" / "data" / "conjunctions.json"
 DATA_DIR = ROOT / "data"
 
@@ -69,9 +73,15 @@ PC_YELLOW = 1e-5
 
 
 def load_objects():
-    data = json.loads(TLE_PATH.read_text())
-    objs = [dict(zip(data["fields"], row)) for row in data["satellites"]]
-    sats = [Satrec.twoline2rv(o["line1"], o["line2"]) for o in objs]
+    """The simulation's objects, initialised from the same OMM records the browser uses."""
+    data = json.loads(OBJECTS_PATH.read_text())
+    objs, sats = [], []
+    for group, values in data["objects"]:
+        fields = dict(zip(data["omm_fields"], values))
+        sat = Satrec()
+        omm.initialize(sat, {k: str(v) for k, v in fields.items()})
+        sats.append(sat)
+        objs.append({"norad_id": fields["NORAD_CAT_ID"], "name": fields["OBJECT_NAME"], "group": group})
     return objs, sats
 
 
@@ -165,20 +175,45 @@ def covariance(r, v, age_days, debris):
     return m @ np.diag(sigma ** 2) @ m.T
 
 
+# Quadrature over the hard-body disk: Gauss-Legendre in radius, uniform (spectrally accurate) in angle.
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(16)
+_RHO, _RHO_W = (_GL_X + 1) / 2, _GL_W / 2
+_THETA = np.linspace(0, 2 * math.pi, 64, endpoint=False)
+_COS, _SIN = np.cos(_THETA), np.sin(_THETA)
+
+
+def disk_probability(mu, c2, radius):
+    """Exact probability that a 2D Gaussian (mean mu, covariance c2) falls inside a disk at the origin."""
+    inv = np.linalg.inv(c2)
+    rho = radius * _RHO[:, None]
+    x = rho * _COS - mu[0]
+    y = rho * _SIN - mu[1]
+    q = inv[0, 0] * x * x + 2 * inv[0, 1] * x * y + inv[1, 1] * y * y
+    density = np.exp(-0.5 * q) / (2 * math.pi * math.sqrt(np.linalg.det(c2)))
+    return float(radius * np.sum(_RHO_W[:, None] * density * rho) * (2 * math.pi / _THETA.size))
+
+
 def collision_probability(ri, vi, rj, vj, cov_i, cov_j, hbr_km):
-    """2D Pc in the encounter plane; small hard-body approximation (HBR << sigma)."""
+    """2D short-encounter Pc (Foster/Chan): the combined covariance and the miss vector are projected
+    onto the encounter plane (perpendicular to the relative velocity) and the Gaussian is integrated
+    over the hard-body disk."""
     miss = rj - ri
     vrel = vj - vi
-    d = np.linalg.norm(miss)
-    x = miss / d if d > 1e-9 else np.cross(vrel, [0.0, 0.0, 1.0])
+    vhat = vrel / np.linalg.norm(vrel)
+    miss_plane = miss - (miss @ vhat) * vhat          # exactly in the encounter plane
+    d = np.linalg.norm(miss_plane)
+    x = miss_plane / d if d > 1e-9 else np.cross(vhat, [0.0, 0.0, 1.0])
     x /= np.linalg.norm(x)
-    y = np.cross(vrel, x); y /= np.linalg.norm(y)
+    y = np.cross(vhat, x)
     b = np.column_stack([x, y])
     c2 = b.T @ (cov_i + cov_j) @ b
-    mu = np.array([d, 0.0])
-    det = np.linalg.det(c2)
-    density = math.exp(-0.5 * mu @ np.linalg.solve(c2, mu)) / (2 * math.pi * math.sqrt(det))
-    return min(1.0, math.pi * hbr_km ** 2 * density)
+    return min(1.0, disk_probability(np.array([d, 0.0]), c2, hbr_km))
+
+
+def geodetic_altitude_km(r):
+    """WGS84 height above the ellipsoid, as in the positions CSVs. A rotation about the z axis does not
+    change it, so the TEME position can be used directly."""
+    return float(ecef_to_geodetic(np.asarray(r)[None, :])[2][0])
 
 
 def risk_level(pc, miss_km):
@@ -231,7 +266,7 @@ def screen_segment(segment):
             "miss_along_km": round(float(miss_rtn[1]), 4),
             "miss_cross_km": round(float(miss_rtn[2]), 4),
             "rel_speed_km_s": round(float(np.linalg.norm(vj - vi)), 4),
-            "altitude_km": round(float(np.linalg.norm(ri)) - 6378.137, 1),
+            "altitude_km": round(geodetic_altitude_km(ri), 1),
             "pc": float(f"{pc:.4g}"),
             "risk": risk_level(pc, miss),
             "debris": "Debris" in (oa["group"], ob["group"]),
@@ -309,7 +344,7 @@ def main():
         "counts": counts,
         "intra_cutoff_hours": INTRA_CUTOFF_HOURS,
         "covariance_model": "assumed RTN sigma (km) = [0.1, 0.5, 0.2] + [0.1, 1.5, 0.1] * element age (days); debris x2",
-        # Compact rows; names and groups are looked up from leo_tle.json by NORAD ID.
+        # Compact rows; names and groups are looked up from leo_objects.json by NORAD ID.
         "fields": APP_FIELDS,
         "rows": [[e[f] for f in APP_FIELDS] for e in trusted if e["risk"] != "green" or e["debris"]],
     }, separators=(",", ":")))
