@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEO Satellite Simulation</title>
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.0/dist/satellite.min.js"></script>
+</head>
+<body>
+<div id="scene"></div>
+<div id="loading">Loading satellites…</div>
+
+<div id="panel" class="card">
+  <h1>LEO Satellite Simulation</h1>
+  <div class="muted small" id="subtitle"></div>
+  <div id="clock">—</div>
+  <div class="row" id="speeds"></div>
+  <div class="row">
+    <button id="now">Jump to now</button>
+    <select id="colorMode" aria-label="Colour satellites by">
+      <option value="group">Colour: constellation</option>
+      <option value="altitude">Colour: altitude</option>
+    </select>
+  </div>
+  <label class="legend-item"><input type="checkbox" id="leoToggle" checked>
+    <span class="swatch" style="background:transparent;border:1.5px solid #6fb8ff"></span>
+    <span>LEO boundary (2,000 km altitude)</span></label>
+
+  <div class="section">
+    <div class="section-title">Find a satellite</div>
+    <input id="search" type="search" placeholder="Name or NORAD ID, e.g. ISS or 25544" autocomplete="off">
+    <div id="suggestions"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Groups</div>
+    <div id="gradient"></div>
+    <div id="gradient-labels" class="small muted"><span>200</span><span>400</span><span>600</span><span>1000</span><span>2000 km</span></div>
+    <div id="legend"></div>
+  </div>
+
+  <div class="section small">
+    <div class="section-title">Visible now</div>
+    <dl id="stats"></dl>
+  </div>
+  <div class="small muted" style="margin-top:10px">Drag to rotate, scroll to zoom, click a satellite for details.</div>
+</div>
+
+<div id="info" class="card">
+  <button id="close" aria-label="Close">×</button>
+  <h2 id="infoName"></h2>
+  <div class="muted small" id="infoSub"></div>
+  <dl id="infoBody"></dl>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
