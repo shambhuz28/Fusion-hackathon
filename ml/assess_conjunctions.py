@@ -15,6 +15,7 @@ Usage:
     python ml/assess_conjunctions.py                 # all conjunctions, prints the top 40
     python ml/assess_conjunctions.py --print 0       # print every conjunction
     python ml/assess_conjunctions.py --pc-target 1e-8
+    python ml/assess_conjunctions.py --app-dir app/data/staging   # files of src/daily_update.py
 """
 
 import argparse
@@ -201,13 +202,17 @@ def main():
     parser.add_argument("--pc-target", type=float, default=M.PC_TARGET,
                         help=f"Pc to reach with the burn (default {M.PC_TARGET:g})")
     parser.add_argument("--workers", type=int, help="processes for the interference check")
+    parser.add_argument("--app-dir", type=Path, default=OUT_PATH.parent,
+                        help="folder with leo_objects.json and conjunctions.json; the result is written there too")
     parser.add_argument("--max-plans", type=int, default=0,
                         help="plan burns for only the N riskiest YES conjunctions (default: all)")
     args = parser.parse_args()
     started = time.time()
 
-    cat = L.Catalogue()
-    data, events, t0, jd0, fr0 = L.load_screening()
+    objects_path = args.app_dir / "leo_objects.json"
+    out_path = args.app_dir / "risk_assessment.json"
+    cat = L.Catalogue(objects_path)
+    data, events, t0, jd0, fr0 = L.load_screening(args.app_dir / "conjunctions.json")
     print(f"{len(events)} screened conjunctions from {data['window_start_utc']} "
           f"({data['window_hours']:g} h, {len(cat.sats)} objects)")
 
@@ -220,7 +225,7 @@ def main():
 
     print("Planning avoidance burns for the YES conjunctions ...")
     ctx = {"cat": cat, "jd0": jd0, "fr0": fr0, "t0": t0, "hbr_km": data["hbr_m"] / 1000.0,
-           "window_hours": data["window_hours"]}
+           "window_hours": data["window_hours"], "objects_path": objects_path}
     plans = plan_all(ctx, events, order, yes, args.pc_target, args.workers, args.max_plans)
     status = [p["status"] for p in plans.values()]
     counts = {s: status.count(s) for s in ("ok", "not_needed", "warning")}
@@ -233,7 +238,7 @@ def main():
     rank[order] = np.arange(1, len(events) + 1)
     report = json.loads(REPORT_PATH.read_text()) if REPORT_PATH.exists() else {}
     best = report.get("model_name")
-    OUT_PATH.write_text(json.dumps({
+    out_path.write_text(json.dumps({
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "screening_generated_utc": data["generated_utc"],
         "assessed_at_utc": data["window_start_utc"],
@@ -252,7 +257,7 @@ def main():
         "maneuvers": {f"{events[k]['tca_ms']}:{events[k]['norad_1']}:{events[k]['norad_2']}": rec
                       for k, rec in plans.items()},
     }, separators=(",", ":")))
-    print(f"\nWrote {OUT_PATH.relative_to(L.ROOT)} in {time.time() - started:.0f} s")
+    print(f"\nWrote {out_path} in {time.time() - started:.0f} s")
     return 0
 
 

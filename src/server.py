@@ -6,6 +6,13 @@
         -> the live data and every historical replay built by src/history.py.
     GET /api/maneuver?n1=<NORAD>&n2=<NORAD>&tca_ms=<ms>&not_before_ms=<ms>[&dataset=...]
         -> avoidance manoeuvre plans for that conjunction (src/maneuver.py).
+    GET /api/status
+        -> the live screening's window and whether the daily update is running.
+
+Daily update: the live data always covers today 00:00 UTC to 7 days ahead. At start-up and every
+15 minutes the server checks the live screening; when it does not start today (e.g. after midnight UTC),
+src/daily_update.py runs in the background (fresh elements, screening, ML ranking) and swaps the new files
+in when it is done; the page then offers to reload. --no-daily-update turns this off.
 
 Screening uses src/screen_conjunctions.py on a persistent worker pool (24 h takes ~15-30 s). Results
 are cached in data/cache/, keyed by the loaded objects, the start hour and the window length, so
@@ -22,6 +29,8 @@ import os
 import re
 import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -32,6 +41,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import _venv  # noqa: F401  (re-runs with .venv/bin/python if packages are missing)
+import daily_update
 import maneuver
 import screen_conjunctions as sc
 import telemetry
@@ -169,17 +179,80 @@ class Screener:
             self.pool.terminate()
 
 
+class DailyUpdater:
+    """Keeps the live screening on today's 7 days by running src/daily_update.py when it is out of date."""
+
+    CHECK_S = 15 * 60
+    RETRY_AFTER_FAILURE_S = 60 * 60
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.proc = None
+        self.started = None
+        self.failed_at = None
+        self.last_error = None
+        threading.Thread(target=self._loop, name="daily-update", daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self.check()
+            except Exception:  # never let the checker thread die
+                traceback.print_exc()
+            time.sleep(self.CHECK_S)
+
+    def _finished(self):
+        """Record the result of a finished update run (call with the lock held)."""
+        if self.proc is not None and self.proc.poll() is not None:
+            ok = self.proc.returncode == 0
+            self.last_error = None if ok else f"the daily update failed (exit {self.proc.returncode}); see the server log"
+            self.failed_at = None if ok else time.time()
+            self.proc = None
+
+    def check(self):
+        with self.lock:
+            if self.proc is not None and self.proc.poll() is None:
+                return
+            self._finished()
+            if daily_update.is_current():
+                return
+            if self.failed_at and time.time() - self.failed_at < self.RETRY_AFTER_FAILURE_S:
+                return
+            print("The live screening does not start today: running src/daily_update.py in the background", flush=True)
+            self.proc = subprocess.Popen([sys.executable, str(Path(daily_update.__file__))], cwd=ROOT)
+            self.started = time.time()
+
+    def status(self):
+        with self.lock:
+            self._finished()
+            running = self.proc is not None
+            start = daily_update.live_window_start()
+            return {
+                "window_start_utc": start.strftime("%Y-%m-%dT%H:%M:%SZ") if start else None,
+                "today_utc": daily_update.today_utc().strftime("%Y-%m-%d"),
+                "current": daily_update.is_current(),
+                "updating": running,
+                "update_started_utc": datetime.fromtimestamp(self.started, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if running else None,
+                "error": self.last_error,
+            }
+
+
 class Handler(SimpleHTTPRequestHandler):
     screener = None
+    updater = None
 
     def do_GET(self):
         url = urlparse(self.path)
-        if url.path not in ("/api/screen", "/api/datasets", "/api/maneuver"):
+        if url.path not in ("/api/screen", "/api/datasets", "/api/maneuver", "/api/status"):
             return super().do_GET()
         query = parse_qs(url.query)
         try:
             if url.path == "/api/datasets":
                 body = json.dumps(self.screener.datasets()).encode()
+            elif url.path == "/api/status":
+                body = json.dumps(self.updater.status() if self.updater else
+                                  {"current": daily_update.is_current(), "updating": False, "disabled": True}).encode()
             elif url.path == "/api/maneuver":
                 body = self.screener.plan_maneuver(query.get("dataset", [""])[0], query)
             else:
@@ -207,6 +280,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt, *args):
+        if self.path.startswith("/api/status") and args and str(args[1]).startswith("2"):
+            return   # polled every minute by each open page
         if "/api/" in self.path or (args and str(args[1])[:1] in "45"):
             super().log_message(fmt, *args)
 
@@ -229,6 +304,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
     parser.add_argument("--workers", type=int, default=min(6, os.cpu_count() or 1))
+    parser.add_argument("--no-daily-update", action="store_true",
+                        help="do not refresh the live data when its screening does not start today")
     args = parser.parse_args()
 
     if not sc.OBJECTS_PATH.exists():
@@ -238,6 +315,7 @@ def main():
         print(f"Port {args.port} is already in use (is the simulation already running there?); using {port}.")
     telemetry.configure("simulation-server", system_metrics=True)
     Handler.screener = Screener(args.workers)
+    Handler.updater = None if args.no_daily_update else DailyUpdater()
     server = ThreadingHTTPServer(("127.0.0.1", port), partial(Handler, directory=str(APP_DIR)))
     print(f"Simulation running at http://127.0.0.1:{port} (Ctrl+C to stop)", flush=True)
     # Treat `kill` like Ctrl+C so the screening workers are always shut down with the server.
