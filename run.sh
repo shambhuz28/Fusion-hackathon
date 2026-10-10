@@ -48,6 +48,12 @@ if [ "${1:-}" != "--serve-only" ]; then
 
   echo "== 3/4 Screening conjunctions for the next 7 days (~4 min) =="
   "$PY" src/screen_conjunctions.py
+
+  # Optional: ML risk ranking and avoidance manoeuvres (needs ml/.venv and a trained model, see README).
+  if [ -x ml/.venv/bin/python ] && [ -f ml/models/collision_risk_model.joblib ]; then
+    echo "== 3b/4 ML risk ranking and avoidance manoeuvres (~10 min) =="
+    ml/.venv/bin/python ml/assess_conjunctions.py --print 20
+  fi
 fi
 
 echo "== 4/4 Starting the simulation server (also screens any chosen date on demand) =="

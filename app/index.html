@@ -95,12 +95,14 @@
 
   <div class="row">
     <select id="conjFilter" aria-label="Which events">
+      <option value="ml">ML: predicted collision (YES)</option>
       <option value="red">Critical only</option>
       <option value="all">Critical + watch</option>
       <option value="debris">Satellite vs debris (all &lt; 5 km)</option>
       <option value="zones">Debris vs debris red zones</option>
     </select>
     <select id="conjSort" aria-label="Sort events">
+      <option value="ml">ML collision probability</option>
       <option value="tca">Soonest TCA</option>
       <option value="pc">Highest Pc</option>
       <option value="miss">Smallest miss</option>
@@ -127,6 +129,7 @@
     <button id="conjClose" aria-label="Close analysis">×</button>
   </div>
   <div id="conjPair"></div>
+  <div id="conjMlPlan"></div>
   <dl id="conjDetailBody"></dl>
   <div id="conjZone"></div>
   <div class="row">
