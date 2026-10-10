@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
 import { makeSatrec } from './data.js';
+import { attachRisk, createBurnMarker, maneuverHtml } from './riskAssessment.js';
 
 const sat = window.satellite;
 const COLOR_A = 0xffd84d;
@@ -42,7 +43,7 @@ const RISK_ORDER = { red: 0, yellow: 1, green: 2 };
 const DAY_MS = 86400000;
 const shortDate = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 
-export function createConjunctionView({ data, scene, camera, sats, state, setSpeed, onAnalyze }) {
+export function createConjunctionView({ data, risk, scene, camera, sats, state, setSpeed, onAnalyze }) {
   // Rows are compact arrays; names and groups come from the satellite list.
   const satByNorad = new Map(sats.map((s) => [s.norad, s]));
   const events = data.rows
@@ -54,6 +55,8 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     Object.assign(e, { idx, name_1: a.name, group_1: a.group, name_2: b.name, group_2: b.group,
       tca_utc: new Date(e.tca_ms).toISOString() });
   });
+  // ML collision-risk probability, decision and avoidance manoeuvres (ml/assess_conjunctions.py).
+  const hasRisk = Boolean(risk) && attachRisk(events, risk) > 0;
   const windowStartMs = Date.parse(data.window_start_utc);
   const windowEndMs = windowStartMs + data.window_hours * 3600000;
 
@@ -66,7 +69,9 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     `${data.window_start_utc.slice(0, 16).replace('T', ' ')} UTC · ` +
     `${((c.red ?? 0) + (c.yellow ?? 0) + (c.green ?? 0)).toLocaleString()} approaches < ${data.screen_km} km ` +
     `(${(c.red ?? 0).toLocaleString()} critical, ${(c.yellow ?? 0).toLocaleString()} watch)`;
-  $('conjNote').textContent =
+  $('conjNote').textContent = (risk ? `ML: ${risk.model.name} trained on ESA's Kelvins CDM data; YES = predicted to end ` +
+    `with Pc ≥ ${risk.model.high_risk_pc.toExponential(0)}. Burns bring Pc below ${risk.maneuver.pc_target.toExponential(0)} ` +
+    `and are checked against every object. ` : '') +
     `Pc uses an assumed covariance (TLEs have none) that grows with element age, and a ${data.hbr_m} m ` +
     `combined hard-body radius.` + (data.intra_cutoff_hours
       ? ` Same-constellation pairs (e.g. Starlink–Starlink) are shown for the first ${data.intra_cutoff_hours} h ` +
@@ -75,6 +80,12 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
 
   const filterEl = $('conjFilter'), sortEl = $('conjSort'), hideSameEl = $('conjHideSame'), listEl = $('conjList');
   const rangeEl = $('conjRange');
+  if (hasRisk) {
+    filterEl.value = 'ml';
+    sortEl.value = 'ml';
+  } else {
+    for (const el of [filterEl, sortEl]) el.querySelector('option[value="ml"]')?.remove();
+  }
   for (const el of [filterEl, sortEl, hideSameEl, rangeEl]) el.onchange = () => { lastIds = ''; renderDays(); renderList(); };
 
   // A focused satellite (selected by the user) overrides the risk filter: all its events are listed.
@@ -82,6 +93,7 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   const matchesFilter = (e) => {
     if (focus) return involves(e, focus.norad);
     if (filterEl.value === 'debris') return satelliteVsDebris(e);
+    if (filterEl.value === 'ml') return e.ml_yes === true;
     return filterEl.value === 'red' ? e.risk === 'red' : e.risk !== 'green';
   };
 
@@ -93,7 +105,8 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     const to = rangeEl.value === 'all' ? Infinity : state.simTime + Number(rangeEl.value) * 3600000;
     let list = events.filter((e) => e.tca_ms >= from && e.tca_ms <= to && passes(e));
     const key = sortEl.value;
-    if (key === 'pc') list.sort((a, b) => b.pc - a.pc);
+    if (key === 'ml') list.sort((a, b) => (a.ml_rank ?? Infinity) - (b.ml_rank ?? Infinity));
+    else if (key === 'pc') list.sort((a, b) => b.pc - a.pc);
     else if (key === 'miss') list.sort((a, b) => a.miss_km - b.miss_km);
     else list.sort((a, b) => a.tca_ms - b.tca_ms);
     return list;
@@ -120,14 +133,24 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
       return;
     }
     lastIds = ids;
-    listEl.innerHTML = shown.map((e) => `
+    listEl.innerHTML = shown.map((e, pos) => `
       <div class="conj-row${active === e ? ' active' : ''}" data-idx="${e.idx}">
         <span class="badge ${e.risk}"></span>
-        <div class="conj-names">${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
+        <div class="conj-names">${hasRisk ? `<span class="conj-rank">${pos + 1}</span>` : ''}${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
         <div class="conj-meta"><span class="when">in ${formatDuration(e.tca_ms - state.simTime)}</span>
-          · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}</div>
+          · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}${mlTag(e)}</div>
       </div>`).join('') || '<div class="muted small">No events match.</div>';
   }
+  // ML probability, decision and manoeuvre status for a list row.
+  function mlTag(e) {
+    if (e.ml_prob == null) return '';
+    const m = e.maneuver;
+    const plan = !e.ml_yes ? '' : m?.status === 'ok' ? ` · burn ${formatDvShort(m.dv_m_s)}`
+      : m?.status === 'warning' ? ' · <span class="ml-warn">⚠ warning</span>' : '';
+    return `<br><span class="ml-tag ${e.ml_yes ? 'yes' : 'no'}">ML ${e.ml_yes ? 'YES' : 'NO'} ${e.ml_prob.toFixed(3)}</span>${plan}`;
+  }
+  const formatDvShort = (v) => (v < 1 ? `${(v * 100).toFixed(1)} cm/s` : `${v.toFixed(2)} m/s`);
+
   // ---------- events per day (click a day to fast-forward there) ----------
   const nDays = Math.ceil(data.window_hours / 24);
   const daysEl = $('conjDays');
@@ -230,8 +253,9 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   group.add(markerA, markerB, tcaMarker, sepLine);
   group.visible = false;
   scene.add(group, orbitA.line, orbitB.line);
+  const burnMarker = createBurnMarker(scene);
 
-  let active = null, recA = null, recB = null;
+  let active = null, recA = null, recB = null, lastManeuver = '';
   const tcaPoint = new THREE.Vector3();
 
   function analyze(e, focus = true) {
@@ -247,6 +271,10 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
     orbitA.show(recA, e.tca_ms);
     orbitB.show(recB, e.tca_ms);
     group.visible = true;
+    const m = e.maneuver;
+    if (m?.status === 'ok') burnMarker.show(m.maneuver_norad === e.norad_1 ? recA : recB, m);
+    else burnMarker.hide();
+    lastManeuver = '';
     state.simTime = e.tca_ms - LEAD_MS;
     setSpeed(10);
     if (focus) camera.position.copy(tcaPoint.clone().normalize().multiplyScalar(tcaPoint.length() + 4.5));
@@ -262,12 +290,23 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
   function close() {
     active = null;
     group.visible = false;
+    burnMarker.hide();
+    $('conjManeuver').innerHTML = '';
     orbitA.hide();
     orbitB.hide();
     $('conjDetail').style.display = 'none';
     lastIds = '';
   }
   $('conjClose').onclick = close;
+  // The manoeuvre box is redrawn every second, so act on pointerdown rather than click.
+  $('conjManeuver').addEventListener('pointerdown', (ev) => {
+    const m = active?.maneuver;
+    if (!ev.target.closest('#manGo') || m?.status !== 'ok') return;
+    state.simTime = m.burn_ms - 60000;   // a minute before the burn, then run at 10x
+    setSpeed(10);
+    const p = burnMarker.position;
+    camera.position.copy(p.clone().normalize().multiplyScalar(p.length() + 4.5));
+  });
   $('conjLead').onclick = () => { if (active) { state.simTime = active.tca_ms - LEAD_MS; setSpeed(10); } };
   $('conjTca').onclick = () => { if (active) { state.simTime = active.tca_ms; setSpeed(0); } };
 
@@ -312,7 +351,14 @@ export function createConjunctionView({ data, scene, camera, sats, state, setSpe
       ['Altitude', `${e.altitude_km.toFixed(0)} km`],
       ['Collision probability', formatPc(e.pc)],
     ];
+    if (e.ml_prob != null) {
+      rows.push(['ML risk probability', `<b>${e.ml_prob.toFixed(3)}</b> (rank ${e.ml_rank.toLocaleString()} of ${events.length.toLocaleString()})`],
+        ['ML decision', `<span class="badge-text ${e.ml_yes ? 'red' : 'green'}">${e.ml_yes ? 'YES · high risk' : 'NO'}</span>`]);
+    }
     $('conjDetailBody').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    // The manoeuvre box only changes with its countdown, once a second.
+    const html = maneuverHtml(e, (n) => satByNorad.get(n)?.name ?? n, Math.floor(state.simTime / 1000) * 1000, risk);
+    if (html !== lastManeuver) { $('conjManeuver').innerHTML = html; lastManeuver = html; }
   }
 
   renderDays();

@@ -9,10 +9,12 @@ import { startPropagator } from './propagator.js';
 import { createSelection } from './selection.js';
 import { createPanel } from './ui.js';
 import { createConjunctionView, loadConjunctions } from './conjunctions.js';
+import { loadRiskAssessment } from './riskAssessment.js';
 
 const sat = window.satellite;
 
-const [{ sats, groupNames, generatedUtc }, conjData] = await Promise.all([loadSatellites(), loadConjunctions()]);
+const [{ sats, groupNames, generatedUtc }, conjData, riskData] =
+  await Promise.all([loadSatellites(), loadConjunctions(), loadRiskAssessment()]);
 groupNames.forEach(g => state.visibleGroups.add(g));
 
 const { renderer, scene, camera, controls, earth } = createScene(document.getElementById('scene'));
@@ -36,9 +38,10 @@ const selection = createSelection({
   },
 });
 
-// Conjunction panel (only when src/screen_conjunctions.py has produced data/conjunctions.json).
+// Conjunction panel (only when src/screen_conjunctions.py has produced data/conjunctions.json), with the
+// ML risk ranking and avoidance manoeuvres when ml/assess_conjunctions.py has produced data/risk_assessment.json.
 const conjunctions = conjData && createConjunctionView({
-  data: conjData, scene, camera, sats, state,
+  data: conjData, risk: riskData, scene, camera, sats, state,
   setSpeed: panel.setSpeed,
   onAnalyze: () => selection.select(-1),
 });

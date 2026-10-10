@@ -166,3 +166,23 @@ assumed covariance.
 If port 8765 is busy (for example the simulation is already running), `run.sh` uses the next free port and
 prints the URL. The Python scripts can be started with plain `python3` too: they re-run themselves with
 `.venv/bin/python` when the packages are missing (`src/_venv.py`).
+
+## ML risk ranking and avoidance manoeuvres (`ml/`)
+
+The model is an XGBoost classifier trained on ESA's Kelvins CDM dataset (`ml/train.py`). It runs in its own environment (`ml/.venv`, see `ml/requirements.txt`).
+
+```bash
+ml/.venv/Scripts/python ml/assess_conjunctions.py      # ~10 min; scores app/data/conjunctions.json
+ml/.venv/Scripts/python ml/verify_maneuvers.py         # ~6 min, 3 checks
+```
+
+1. Every screened conjunction becomes a Kelvins-style CDM row (`ml/live_features.py`) and gets an ML risk probability plus a YES/NO decision (YES = predicted to end with Pc >= 1e-6). Conjunctions are ranked by that probability.
+2. For each YES conjunction, `ml/maneuver.py` finds the smallest impulsive burn (Clohessy-Wiltshire relative motion, 7 burn times up to 3 orbits before TCA, 2,000 directions) that brings Pc below 1e-6, plus a 5 % margin.
+3. Each burn's new path is screened against every object from the burn until 2 orbits after TCA. A burn that creates or worsens any approach with Pc >= 1e-6 is rejected, and up to 4 alternatives are tried. If none is safe, if the burn would exceed 1 m/s, if TCA is less than 15 min away, or if both objects are debris, the conjunction gets a **COLLISION WARNING**.
+4. Output: `app/data/risk_assessment.json`. The app's conjunction panel then lists ML YES events ranked by probability. Clicking one shows the manoeuvre box: Δv magnitude, direction (forward/back, left/right, up/down, as seen from the satellite facing its direction of travel) with an arrow, burn time, and miss/Pc before and after. The 3D view marks the burn point; **Go to burn** moves the clock and camera there.
+
+Last run, 40,234 conjunctions: 5,865 YES, 3,608 burns planned (median about 20 cm/s), 39 not needed, 2,218 warnings (1,526 debris vs debris, about 580 where every burn found would approach another object). Verification on 200 burns: the CW displacement differs from two-body + J2 propagation by 0.19 % (median), and Pc stays below 1e-6 under J2 for 99 % (worst 3.7e-6); a burn 10 % smaller is not enough for 199 of 200; brute-force 2 s screening of 4 burns against all objects found no missed interference.
+
+Burns are larger than real ones (typically 1-10 cm/s) because Pc uses the screener's assumed, km-sized TLE covariance. The model was trained on ESA CDMs, which carry precise covariances; on TLE-derived inputs its probability is best read as a ranking.
+
+`src/screen_conjunctions.py` now also runs on Windows: without `fork`, each worker process loads the objects itself (`spawn`). A 30 h test run reproduced all 7,711 events of the original run exactly.
