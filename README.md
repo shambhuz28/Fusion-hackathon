@@ -1,5 +1,58 @@
-# Fusion-hackathon
-# Problem Statement :
+# OrbitGuard AI: satellite collision prediction and avoidance (Fusion hackathon)
+
+**Predict satellite collisions. Rank the risk. Plan the dodge.** Every active Low Earth Orbit satellite and four
+debris clouds (18,550 objects) are propagated with SGP4 from public CelesTrak data, screened for close approaches
+over the next 7 days, ranked by collision probability and an ML model, and given a checked avoidance manoeuvre.
+A second simulation lets the satellites themselves exchange orbit data by radio and decide who moves.
+
+**Live demo (free hosting, refreshed daily):**
+
+- Main 3D simulation: https://shambhu-28-satellite-collision-avoidance.static.hf.space
+- Satellite communication: https://shambhu-28-satellite-collision-avoidance.static.hf.space/autonomy/index.html
+- Presentation: `OrbitGuard AI - Final PPT (updated).pptx` / `.pdf`
+
+Team: Worst Case. Shambhu Gaikwad (leader), Amey, Atharv, Suyash.
+
+## Features at a glance
+
+| | |
+| --- | --- |
+| **3D globe** | 18,550 objects moving in real time (SGP4 in the browser), time machine, colours by constellation, search |
+| **7-day screening** | all-vs-all close approaches < 5 km, exact closest point, collision probability (Foster/Chan), red/yellow/green |
+| **AI ranking** | XGBoost trained on ESA Kelvins conjunction data, most dangerous events first |
+| **Avoidance manoeuvre** | smallest burn (time, direction, Δv) that makes the encounter safe, re-checked against every object, then a return to the original orbit |
+| **Debris red zones** | debris-vs-debris collisions and the active satellites passing through the fragment cloud |
+| **Past collisions** | Iridium 33 × Cosmos 2251 (2009), Cerise (1996), Yunhai 1-02 (2021) rebuilt from data 24 h before: all flagged |
+| **Satellite communication** | satellites within 50 km share orbit, uncertainty and fuel; the one for which the detour costs the smallest share of its fuel manoeuvres |
+| **Always current** | daily refresh: locally by the server, online by GitHub Actions, deployed to a free Hugging Face Space |
+
+Current numbers (screening of 10–16 Oct 2026): 118,318 approaches < 5 km, 24,634 watch, **1,661 critical**;
+5,600 ML "YES" events with 3,326 burns planned; in a 6 h communication run the satellites found 91 threats and
+avoided 46 on their own.
+
+## Quick start
+
+```bash
+git clone https://github.com/shambhuz28/Fusion-hackathon.git && cd Fusion-hackathon
+./run.sh                # first run: Python environments, data, screening, ML, replays, communication run, servers
+```
+
+Then open http://127.0.0.1:8765 (main simulation) and http://127.0.0.1:8770/autonomy/ (satellite
+communication). Needs Python 3 and internet access for CelesTrak; see [Running](#running) for the options.
+
+## Project layout
+
+| Path | Contents |
+| --- | --- |
+| `src/` | data download (`fetch_positions.py`), screening (`screen_conjunctions.py`), manoeuvre planner (`maneuver.py`), server (`server.py`), daily update, Space-Track history, plan precompute for hosting |
+| `app/` | main 3D web app (Three.js, satellite.js) and its data in `app/data/` |
+| `ml/` | ESA Kelvins download, features, model training, live risk assessment, precomputed burns and their verification |
+| `autonomy/` | satellite-communication simulation: `engine.py` (network run) and its web page |
+| `tests/` | accuracy checks of the screening, browser SGP4 and manoeuvres |
+| `deploy/`, `.github/workflows/deploy.yml`, `Dockerfile` | static build, Hugging Face deployment, daily GitHub Actions refresh, container |
+| `run.sh` | runs everything and starts both servers |
+
+## Problem statement
 
 Low Earth Orbit is increasingly congested; conjunction (near-collision) warnings between satellites and debris are growing faster than ground teams can manually evaluate and respond to each one. Expected Solution: Using public two-line element (TLE) orbital data, build a system that predicts upcoming close approaches between objects, ranks them by collision probability, and recommends an automated avoidance maneuver (timing + delta-v direction) for at least one sample conjunction event. 
 
@@ -211,9 +264,18 @@ assumed covariance.
 ## Running
 
 ```bash
-./run.sh               # download -> positions -> export -> 7-day screening (~4 min) -> server
-./run.sh --serve-only  # just start the server with the existing data
+./run.sh               # everything: setup, data, 7-day screening, ML, replays, satellite communication, both servers
+./run.sh --serve-only  # just start both servers with the existing data
+./run.sh --skip-ml     # everything except the ~10 min ML step
+./run.sh --verify      # also run the accuracy tests
 ```
+
+Both servers start together and stop together (Ctrl+C, `kill`, or either one failing):
+
+| Server | URL |
+| --- | --- |
+| Main simulation and its APIs (`src/server.py`, `PORT`) | http://127.0.0.1:8765 (button "Satellite communication" → `/autonomy/`) |
+| Satellite-communication simulation (`autonomy/serve.py`, `AUTONOMY_PORT`) | http://127.0.0.1:8770/autonomy/ |
 
 `run.sh` starts `src/server.py`, which serves the simulation and screens conjunctions **on demand for any date**:
 when the clock leaves the screened window (date picker, +1 day/week, playback), the panel requests
@@ -297,9 +359,9 @@ An XGBoost classifier trained on ESA's Kelvins Collision Avoidance Challenge dat
 ranks the screened conjunctions. It runs in its own environment, `ml/.venv` (see `ml/requirements.txt`).
 
 ```bash
-ml/.venv/Scripts/python ml/assess_conjunctions.py   # ~10 min: scores app/data/conjunctions.json, writes app/data/risk_assessment.json
-ml/.venv/Scripts/python ml/verify_maneuvers.py      # ~8 min, 3 checks of the precomputed burns
-ml/.venv/Scripts/python ml/predict.py --evaluate    # the model on ESA's held-out test events
+ml/.venv/bin/python ml/assess_conjunctions.py   # ~10 min: scores app/data/conjunctions.json, writes app/data/risk_assessment.json
+ml/.venv/bin/python ml/verify_maneuvers.py      # ~8 min, 3 checks of the precomputed burns
+ml/.venv/bin/python ml/predict.py --evaluate    # the model on ESA's held-out test events
 ```
 
 1. Every screened conjunction becomes a Kelvins-style CDM row (`ml/live_features.py`) and gets an ML risk
@@ -318,9 +380,9 @@ ml/.venv/Scripts/python ml/predict.py --evaluate    # the model on ESA's held-ou
    (e.g. when the app is served without the server), with burn time, components, miss and Pc before/after,
    and **Go to burn**.
 
-Last run (38,854 conjunctions of the 7-day screening): 5,515 YES; 3,347 burns planned (median 22 cm/s),
-38 not needed, 2,130 warnings (1,540 where neither object can manoeuvre, 486 where every burn found approaches
-another object, 77 needing more than 1 m/s, 27 less than 15 min before TCA). Verification on 200 burns: the CW
+Last run (38,548 conjunctions of the 7-day screening, 10–16 Oct 2026): 5,600 YES; 3,326 burns planned,
+37 not needed, 2,237 warnings (neither object can manoeuvre, every burn approaches another object, more than
+1 m/s needed, or less than 15 min before TCA). Verification on 200 burns: the CW
 displacement differs from two-body + J2 propagation by 0.20 % (median) and Pc stays below 1e-6 under J2 for 98 %
 (worst 3.7e-6); a burn 10 % smaller is not enough for 199 of 200; brute-force 2 s screening of 4 burns against
 all 18,550 objects found no missed interference. The model itself: XGBoost, chosen over logistic regression, random
@@ -335,6 +397,68 @@ on demand by the server are listed without it.
 ## Second simulation: satellites that talk to each other
 
 `autonomy/` is a separate simulation in which satellites share their orbit data with neighbours within 50 km and
-avoid collisions on their own (no ground screening). Open it with the **"Satellite communication"** button in the
-main simulation (the main server also serves it at `/autonomy/`), or run it alone with `autonomy/run.sh`; see
-`autonomy/README.md`. Run `python3 autonomy/engine.py` once first to create its network run.
+avoid collisions on their own, without ground screening. Open it with the **"Satellite communication"** button in
+the main simulation (served at `/autonomy/` by the main server and at `/autonomy/index.html` online), or run it
+alone with `autonomy/run.sh`. `./run.sh` creates its network run; by hand: `python3 autonomy/engine.py`.
+
+How it works (details in `autonomy/README.md`):
+
+1. **Broadcast** every 10 s: position, velocity, orbital elements, position uncertainty and fuel level.
+2. **Range:** only satellites within 50 km receive it (links drawn in the 3D view).
+3. **Keep or discard:** the receiver predicts the next 24 h; no risk → discarded, possible collision → kept as a
+   threat and monitored.
+4. **Who moves:** both satellites hold the same data and apply the same rule, so they agree without more messages.
+   Each one's detour Δv comes from its velocity relative to the encounter, its mass and thruster turn that into
+   propellant, and the satellite for which the detour costs the **smallest share of its remaining fuel** flies it
+   (above a 5 % reserve). The detour rejoins the original orbit after the encounter.
+5. **Silent objects:** debris and rocket bodies have no radio; they stay with the ground screening.
+
+6 h run on the real sky (10 Oct 2026 00:00–06:00 UTC):
+
+| | |
+| --- | --- |
+| Satellites with radio / silent objects | 15,874 / 2,676 |
+| Messages received | 3,581,156 |
+| Data assessed / discarded on board | 1,327,130 / 1,326,832 (99.98 %) |
+| Threats kept | 91: **46 avoided**, 33 monitored, 12 warnings |
+| Critical pairs warned ≥ 10 min ahead | 56 of 241 (162 first met during the approach itself) |
+
+Example: STARLINK-5320 × 2026-229A, 166 m apart and warned 2.4 h ahead. The detour costs Starlink (electric
+thruster) 0.25 % of its fuel against 1.79 % for the other satellite, so Starlink moves: 1.5 m/s, miss distance
+1.77 km, collision chance from 1 in 670 to 1 in 1,000,000.
+
+In the browser, SGP4 for every object and the search for satellites within link range run in a Web Worker
+(`autonomy/js/net-worker.js`, spatial hash), so the 3D view stays smooth.
+
+## Hosting (free): Hugging Face static Space
+
+Live: https://shambhu-28-satellite-collision-avoidance.static.hf.space (satellite communication at
+`/autonomy/index.html`; the static host does not open folder URLs such as `/autonomy/`, so pages link to the file).
+
+Free Docker Spaces need a paid PRO plan, Railway has no free plan and Vercel's free Python functions only run for
+seconds, so the free deployment is a **static site**: the 7-day screening, ML ranking, the avoidance plans of the
+critical conjunctions and the satellite-communication run are computed beforehand and served as files.
+
+1. Create a free account at https://huggingface.co and a token with **write** access
+   (Settings → Access Tokens → New token → Write).
+2. Build the data and deploy (creates the Space if needed; live within a minute):
+
+   ```bash
+   ./run.sh                                       # or: python src/daily_update.py
+   python src/precompute_plans.py --top 150       # avoidance plans of the 150 most probable collisions
+   HF_TOKEN=hf_... deploy/huggingface.sh <hf-username>/satellite-collision-avoidance
+   DRY_RUN=1 deploy/huggingface.sh <hf-username>/satellite-collision-avoidance   # only list the files
+   ```
+
+3. Daily refresh: `.github/workflows/deploy.yml` does step 2 every day at 00:30 UTC on GitHub Actions (free). Add the
+   repository secret `HF_TOKEN` (Settings → Secrets and variables → Actions) and, for another Space, the variable
+   `HF_SPACE`. It can also be started by hand from the Actions tab.
+
+Limits of the static site (run `./run.sh` locally for everything):
+
+- Screening other dates (`api/screen`) needs the local server.
+- "Suggest avoidance manoeuvre" works for the precomputed critical conjunctions only.
+- The historical replays are left out: they are built from Space-Track data, which is for the account holder's own use.
+
+`Dockerfile` runs the full server on any Docker host:
+`docker build -t collision-avoidance . && docker run -p 7860:7860 collision-avoidance`.
