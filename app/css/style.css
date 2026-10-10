@@ -182,3 +182,9 @@ dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   #zoneAlert { top: calc(45% + 24px); left: 16px; right: 16px; }
   #planHud { display: none !important; }   /* no room: the same details are in the conjunction card */
 }
+
+/* Link styled as a button (e.g. "Satellite communication" to the crosslink simulation). */
+a.button-link { display: block; margin: 8px 0 4px; padding: 6px 10px; border-radius: 6px; text-align: center;
+  font-weight: 600; color: var(--text); text-decoration: none; background: rgba(92, 225, 230, 0.15);
+  border: 1px solid rgba(92, 225, 230, 0.55); }
+a.button-link:hover { background: rgba(92, 225, 230, 0.28); }

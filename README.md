@@ -331,3 +331,10 @@ Burns are larger than real ones (typically 1-10 cm/s) because Pc uses the screen
 covariance. The model was trained on ESA CDMs, which carry precise covariances; on TLE-derived inputs its
 probability is best read as a ranking. The ML ranking covers the screening produced by `run.sh`; windows screened
 on demand by the server are listed without it.
+
+## Second simulation: satellites that talk to each other
+
+`autonomy/` is a separate simulation in which satellites share their orbit data with neighbours within 50 km and
+avoid collisions on their own (no ground screening). Open it with the **"Satellite communication"** button in the
+main simulation (the main server also serves it at `/autonomy/`), or run it alone with `autonomy/run.sh`; see
+`autonomy/README.md`. Run `python3 autonomy/engine.py` once first to create its network run.

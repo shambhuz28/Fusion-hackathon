@@ -48,6 +48,7 @@ import telemetry
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = ROOT / "app"
+AUTONOMY_DIR = ROOT / "autonomy"   # the crosslink simulation, served at /autonomy/ (it loads /app/js and /app/data)
 CACHE_DIR = ROOT / "data" / "cache"
 MAX_HOURS = 168
 MAX_CACHED_PLANS = 64
@@ -242,8 +243,25 @@ class Handler(SimpleHTTPRequestHandler):
     screener = None
     updater = None
 
+    def translate_path(self, path):
+        """/autonomy/... and /app/... map to those folders; everything else to app/ (the main simulation).
+        The standard resolution (which drops '..' segments) runs inside the chosen folder."""
+        for prefix, base in (("/autonomy/", AUTONOMY_DIR), ("/app/", APP_DIR)):
+            if path.startswith(prefix):
+                main_dir, self.directory = self.directory, str(base)
+                try:
+                    return super().translate_path("/" + path[len(prefix):])
+                finally:
+                    self.directory = main_dir
+        return super().translate_path(path)
+
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path == "/autonomy":
+            self.send_response(301)
+            self.send_header("Location", "/autonomy/")
+            self.end_headers()
+            return
         if url.path not in ("/api/screen", "/api/datasets", "/api/maneuver", "/api/status"):
             return super().do_GET()
         query = parse_qs(url.query)

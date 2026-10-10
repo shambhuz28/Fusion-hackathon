@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satellite Crosslink Avoidance</title>
+<link rel="stylesheet" href="../app/css/style.css">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@6.0.2/dist/satellite.min.js"></script>
+</head>
+<body>
+<div id="scene"></div>
+<div id="loading">Loading satellites and the network run…</div>
+<div id="notice" role="status"></div>
+
+<div id="panel" class="card">
+  <a class="button-link" href="/">← Main simulation</a>
+  <h1>Satellite-to-satellite collision avoidance</h1>
+  <div class="muted small" id="subtitle"></div>
+  <p class="small explain">Each satellite broadcasts its position, velocity, orbit, fuel and position uncertainty to
+    every satellite within <b id="rangeText">50 km</b>. A receiver predicts whether the sender will come close to it
+    in the next <b id="horizonText">24 h</b>: if not, it <b>discards</b> the data; if they can collide it
+    <b>keeps</b> it. The satellite for which a temporary detour costs the smallest share of its remaining fuel (from its mass, thruster, fuel level and the Δv its velocity needs) flies it before the encounter. Debris has no
+    radio and is not seen by the network.</p>
+  <div id="clock">—</div>
+  <div class="row" id="speeds"></div>
+  <div class="row">
+    <button id="toStart">Start of run</button>
+    <button id="nextThreat">Next threat ▸</button>
+  </div>
+  <div class="section">
+    <div class="section-title">Network so far</div>
+    <dl id="stats"></dl>
+  </div>
+  <div class="section">
+    <div class="section-title">Legend</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-radio)"></span>Satellite with radio</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-link)"></span>In contact (link drawn)</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-monitor)"></span>Keeps a threat (monitoring)</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-manoeuvre)"></span>Flying an avoidance detour</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-warning)"></span>Collision risk, cannot avoid</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-silent)"></span>Debris / rocket body (no radio)</div>
+    <label class="small"><input type="checkbox" id="showSilent" checked> Show debris</label>
+  </div>
+  <div class="section small muted" id="coverage"></div>
+</div>
+
+<div id="feedCard" class="card">
+  <div class="conj-head"><h1>Message feed</h1><span class="muted small" id="feedCount"></span></div>
+  <div id="feed"></div>
+</div>
+
+<div id="threatCard" class="card">
+  <div class="conj-head"><h1>Threats kept</h1><span class="muted small" id="threatCount"></span></div>
+  <div id="threats"></div>
+</div>
+
+<div id="detail" class="card">
+  <button id="detailClose" class="close" aria-label="Close">×</button>
+  <div id="detailBody"></div>
+  <label class="small" id="exaggerateLabel"><input type="checkbox" id="exaggerate" checked> Draw the detour ×300 so it can
+    be seen (distances in this card are true values)</label>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
