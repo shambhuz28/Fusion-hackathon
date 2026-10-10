@@ -10,12 +10,13 @@ import { startPropagator } from './propagator.js';
 import { createSelection } from './selection.js';
 import { createPanel } from './ui.js';
 import { createConjunctionView, loadConjunctions } from './conjunctions.js';
+import { loadRiskAssessment } from './riskAssessment.js';
 import { notify } from './notice.js';
 
 const sat = window.satellite;
 
-const [{ sats, groupNames, generatedUtc, clockRange, event }, conjData, report] =
-  await Promise.all([loadSatellites(), loadConjunctions(), loadReport()]);
+const [{ sats, groupNames, generatedUtc, clockRange, event }, conjData, report, riskData] =
+  await Promise.all([loadSatellites(), loadConjunctions(), loadReport(), loadRiskAssessment()]);
 groupNames.forEach(g => state.visibleGroups.add(g));
 // A replay starts an hour before the collision; live data starts now. Either way inside the valid range.
 if (event) state.simTime = Date.parse(event.start) - 3600000;
@@ -43,9 +44,10 @@ const selection = createSelection({
   },
 });
 
-// Conjunction panel: the screening from run.sh, replaced on demand when the clock leaves its window.
+// Conjunction panel: the screening from run.sh, replaced on demand when the clock leaves its window,
+// ranked by the ML model when ml/assess_conjunctions.py has written data/risk_assessment.json.
 const conjunctions = createConjunctionView({
-  data: conjData, scene, camera, sats, state, clockRange,
+  data: conjData, risk: riskData, scene, camera, sats, state, clockRange,
   setSpeed: panel.setSpeed,
   onAnalyze: () => selection.select(-1),
 });
