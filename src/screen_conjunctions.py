@@ -227,6 +227,12 @@ def risk_level(pc, miss_km):
 _WORKER = {}
 
 
+def _init_worker(t0, args):
+    """Worker set-up where processes cannot be forked (Windows): load the objects again."""
+    objs, sats = load_objects()
+    _WORKER.update(objs=objs, sats=sats, t0=t0, args=args)
+
+
 def screen_segment(segment):
     """Screen grid steps [k_start, k_end) and return refined events (runs in a worker process)."""
     objs, sats, t0, args = _WORKER["objs"], _WORKER["sats"], _WORKER["t0"], _WORKER["args"]
@@ -296,9 +302,13 @@ def main():
     print(f"Screening {len(sats)} objects, {args.hours:g} h from {t0.isoformat()} in {args.step:g} s steps, "
           f"{len(segments)} segment(s) on {min(args.workers, len(segments))} worker(s)")
 
-    # Workers are forked after these globals are set, so each one inherits the parsed objects.
+    # Forked workers inherit these globals; without fork (Windows) each worker loads the objects itself.
     _WORKER.update(objs=objs, sats=sats, t0=t0, args=args)
-    with mp.get_context("fork").Pool(min(args.workers, len(segments))) as pool:
+    if "fork" in mp.get_all_start_methods():
+        pool_args = (mp.get_context("fork"), {})
+    else:
+        pool_args = (mp.get_context("spawn"), {"initializer": _init_worker, "initargs": (t0, args)})
+    with pool_args[0].Pool(min(args.workers, len(segments)), **pool_args[1]) as pool:
         results = []
         for n_done, seg_events in enumerate(pool.imap_unordered(screen_segment, segments), 1):
             results.extend(seg_events)
