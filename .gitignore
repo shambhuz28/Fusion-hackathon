@@ -7,3 +7,5 @@ data/conjunctions_latest.csv
 data/cache/
 data/history/
 app/data/history/
+app/data/staging/
+data/staging/

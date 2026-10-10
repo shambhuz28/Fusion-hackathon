@@ -216,6 +216,28 @@ when the clock leaves the screened window (date picker, +1 day/week, playback), 
 If port 8765 is busy, the next free port is used. The Python scripts also work with plain `python3`
 (they re-run themselves with `.venv/bin/python`, see `src/_venv.py`).
 
+### Daily update: always today and the next 6 days
+
+The live data always covers **today 00:00 UTC to 7 days ahead**, and the "Events per day" chart shows today and
+the next 6 calendar days by the real date. `src/daily_update.py` downloads fresh elements from CelesTrak
+(cached downloads, or the current elements, when CelesTrak refuses), exports them, screens 7 days from today
+00:00 UTC and runs the ML ranking (`ml/`, when set up). It builds everything in `app/data/staging/` and moves the
+files into `app/data/` only when all steps have succeeded (~15 min on 16 cores).
+
+`src/server.py` runs it by itself: at start-up and every 15 minutes it checks whether the live screening starts
+today, and if not (e.g. after midnight UTC) updates it in the background (`GET /api/status` reports progress).
+An open page shows "Updating to today's 7 days…" and then "New 7-day screening ready · Reload". Without the
+server, the panel says when the screening is not from today; run the update by hand:
+
+```bash
+python src/daily_update.py            # nothing to do if the screening already starts today
+python src/daily_update.py --force    # rebuild anyway (--no-download, --no-ml, --days N)
+python src/server.py --no-daily-update   # serve without the automatic refresh
+```
+
+Days the loaded screening does not cover are drawn grey ("not screened yet"); a history replay, or another week
+screened on demand and being viewed, shows its own days.
+
 ### Validity of the orbital data
 
 SGP4 elements are only meaningful near their epoch. Each object is shown and screened only within

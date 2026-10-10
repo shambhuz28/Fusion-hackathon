@@ -53,7 +53,7 @@ const shortDate = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numer
 
 export function createConjunctionView({ data: initialData, risk, scene, camera, sats, state, setSpeed, onAnalyze, clockRange }) {
   const satByNorad = new Map(sats.map((s) => [s.norad, s]));
-  let data = null, events = [], windowStartMs = 0, windowEndMs = 0, nDays = 0;
+  let data = null, events = [], windowStartMs = 0, windowEndMs = 0;
   // ML risk ranking (ml/assess_conjunctions.py) of the events of the loaded window, if it covers them.
   let mlEvents = 0;
   // Debris-debris red zones of the loaded window (debris_zones in src/screen_conjunctions.py).
@@ -78,7 +78,6 @@ export function createConjunctionView({ data: initialData, risk, scene, camera, 
     mlEvents = attachRisk(events, risk);
     windowStartMs = Date.parse(d.window_start_utc);
     windowEndMs = windowStartMs + d.window_hours * 3600000;
-    nDays = Math.ceil(d.window_hours / 24);
     setZones(d.debris_zones);
 
     const c = d.counts ?? {};
@@ -208,37 +207,103 @@ export function createConjunctionView({ data: initialData, risk, scene, camera, 
   }
 
   // ---------- events per day (click a day to fast-forward there) ----------
+  // Calendar days (UTC). For the live data the chart always shows today and the next 6 days by the real
+  // date, whatever window is loaded; days the loaded screening does not cover are greyed out. A history
+  // replay, or another week loaded on demand and being viewed, shows its own days instead.
   const daysEl = $('conjDays');
-  // Each bar covers 24 h from the screening start, so label it with its exact range.
+  const CHART_DAYS = 7;
+  const utcDay = (ms) => Math.floor(ms / DAY_MS) * DAY_MS;
   const stamp = (ms) => `${shortDate(ms)} ${new Date(ms).toISOString().slice(11, 16)}`;
-  const dayRange = (d) => `${stamp(windowStartMs + d * DAY_MS)} – ${stamp(Math.min(windowEndMs, windowStartMs + (d + 1) * DAY_MS))}`;
+  let chartStartMs = 0;
+  function chartStart() {
+    const today = utcDay(Date.now());
+    const overlapsWeek = windowStartMs < today + CHART_DAYS * DAY_MS && windowEndMs > today;
+    return !DATASET && (overlapsWeek || !covered(state.simTime)) ? today : utcDay(windowStartMs);
+  }
   function renderDays() {
-    const counts = new Array(nDays).fill(0);
+    chartStartMs = chartStart();
+    const today = utcDay(Date.now());
+    const counts = new Array(CHART_DAYS).fill(0);
     for (const e of events) {
-      const d = Math.floor((e.tca_ms - windowStartMs) / DAY_MS);
-      if (d >= 0 && d < nDays && passes(e)) counts[d]++;
+      const d = Math.floor((e.tca_ms - chartStartMs) / DAY_MS);
+      if (d >= 0 && d < CHART_DAYS && passes(e)) counts[d]++;
     }
     const max = Math.max(1, ...counts);
-    daysEl.innerHTML = counts.map((n, d) => `
-      <button class="day" data-day="${d}" title="${n.toLocaleString()} events · ${dayRange(d)} UTC">
-        <span class="count">${n.toLocaleString()}</span>
-        <span class="bar" style="height:${Math.max(2, Math.round((n / max) * 40))}px"></span>
-        <span class="label">${shortDate(windowStartMs + d * DAY_MS)}</span>
-      </button>`).join('');
+    daysEl.innerHTML = counts.map((n, d) => {
+      const from = chartStartMs + d * DAY_MS, to = from + DAY_MS;
+      const screened = data !== null && from < windowEndMs && to > windowStartMs;
+      const partial = screened && (from < windowStartMs || to > windowEndMs);
+      const title = !screened ? `${shortDate(from)}: not screened yet`
+        : `${n.toLocaleString()} events · ${stamp(Math.max(from, windowStartMs))} – ${stamp(Math.min(to, windowEndMs))} UTC` +
+          (partial ? ' (part of the day screened)' : '');
+      return `<button class="day${screened ? '' : ' unscreened'}${from === today ? ' today' : ''}" data-day="${d}" title="${title}">
+        <span class="count">${screened ? n.toLocaleString() : '–'}</span>
+        <span class="bar" style="height:${screened ? Math.max(2, Math.round((n / max) * 40)) : 2}px"></span>
+        <span class="label">${from === today ? 'Today' : shortDate(from)}</span>
+      </button>`;
+    }).join('');
     highlightDay();
   }
   function highlightDay() {
-    const current = Math.floor((state.simTime - windowStartMs) / DAY_MS);
+    const current = Math.floor((state.simTime - chartStartMs) / DAY_MS);
     for (const b of daysEl.children) b.classList.toggle('current', Number(b.dataset.day) === current);
   }
   daysEl.onclick = (ev) => {
     const b = ev.target.closest('.day');
     if (!b) return;
-    state.simTime = windowStartMs + Number(b.dataset.day) * DAY_MS;  // start of that day
+    // Start of that day; today starts now. A day outside the loaded window is screened on demand.
+    const dayStart = chartStartMs + Number(b.dataset.day) * DAY_MS;
+    state.simTime = dayStart === utcDay(Date.now()) ? Math.max(dayStart, Date.now()) : dayStart;
     rangeEl.value = '24';
     lastIds = '';
+    renderDays();
     renderList();
   };
+
+  // ---------- freshness of the live data (daily update by src/server.py) ----------
+  // The live screening should start today. The server refreshes it daily (src/daily_update.py); the page
+  // shows its progress and offers to reload when a new screening is ready.
+  const liveStart = initialData && !DATASET ? initialData.window_start_utc : null;
+  const freshEl = $('conjFresh');
+  const fmtDay = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  let lastDay = utcDay(Date.now()), statusApi = true;
+  async function checkFreshness() {
+    if (utcDay(Date.now()) !== lastDay) {    // midnight UTC passed: the chart moves on by a day
+      lastDay = utcDay(Date.now());
+      renderDays();
+    }
+    if (!liveStart) return;
+    const today = utcDay(Date.now());
+    const week = `${fmtDay(today)} – ${fmtDay(today + (CHART_DAYS - 1) * DAY_MS)}`;
+    let s = null;
+    if (statusApi) {
+      try {
+        const res = await fetch('api/status');
+        if (res.ok) s = await res.json(); else statusApi = false;
+      } catch { statusApi = false; }
+    }
+    const loadedCurrent = utcDay(Date.parse(liveStart)) === today;
+    if (s && s.window_start_utc && s.window_start_utc !== liveStart && s.current) {
+      freshEl.className = 'fresh ready';
+      freshEl.innerHTML = `✓ New 7-day screening ready (${week}). <button id="freshReload">Reload</button>`;
+    } else if (loadedCurrent) {
+      freshEl.className = '';
+      freshEl.innerHTML = '';
+    } else if (s?.updating) {
+      freshEl.className = 'fresh';
+      freshEl.innerHTML = `<span class="spinner"></span>Updating to today's 7 days (${week}): new orbital data, ` +
+        `screening and ML ranking, about 15-25 min. The page offers to reload when it is done.`;
+    } else {
+      freshEl.className = 'fresh warn';
+      freshEl.innerHTML = `This screening starts ${fmtDay(Date.parse(liveStart))}, not today (${fmtDay(today)}). ` +
+        (s?.error ? `${escapeHtml(s.error)}.`
+          : s ? 'The server will refresh it shortly.'
+            : 'Run <code>python src/daily_update.py</code> (or <code>./run.sh</code>) to refresh it.');
+    }
+  }
+  freshEl.addEventListener('click', (ev) => { if (ev.target.closest('#freshReload')) location.reload(); });
+  checkFreshness();
+  setInterval(checkFreshness, 60000);
 
   // Restrict the list to one satellite and show its debris check in the satellite card.
   function setFocus(s) {

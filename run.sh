@@ -46,8 +46,8 @@ if [ "${1:-}" != "--serve-only" ]; then
     "$PY" src/export_sim_data.py "${ACTIVE[@]}"
   fi
 
-  echo "== 3/4 Screening conjunctions for the next 7 days (~4 min) =="
-  "$PY" src/screen_conjunctions.py
+  echo "== 3/4 Screening conjunctions from today 00:00 UTC for 7 days (~4 min) =="
+  "$PY" src/screen_conjunctions.py --start "$(date -u +%Y-%m-%dT00:00:00Z)"
 
   # Optional: ML risk ranking and avoidance manoeuvres (needs ml/.venv and a trained model, see README).
   if [ -x ml/.venv/bin/python ] && [ -f ml/models/collision_risk_model.joblib ]; then

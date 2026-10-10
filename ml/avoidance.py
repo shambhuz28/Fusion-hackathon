@@ -217,13 +217,13 @@ def refine_pair(ctx, man, other, t_guess, cand):
 _W = {}
 
 
-def _init_worker(t0_iso, plans, max_rel):
+def _init_worker(t0_iso, plans, max_rel, objects_path):
     from datetime import datetime
     from sgp4.api import jday
-    cat = L.Catalogue()
+    cat = L.Catalogue(objects_path)
     t0 = datetime.fromisoformat(t0_iso)
     jd0, fr0 = jday(t0.year, t0.month, t0.day, t0.hour, t0.minute, t0.second)
-    valid_from, valid_to, _ = sc.load_validity()
+    valid_from, valid_to, _ = sc.load_validity(objects_path)
     _W.update(cat=cat, jd0=jd0, fr0=fr0, max_rel=max_rel, array=SatrecArray(cat.sats),
               t0_ms=t0.timestamp() * 1000.0, valid_from=valid_from, valid_to=valid_to,
               plan_id=np.array([p["plan_id"] for p in plans]),
@@ -313,7 +313,8 @@ def check_interference(ctx, plans, workers=None):
 
     lean = [{k: p[k] for k in ("plan_id", "man_idx", "t_burn", "t_end", "n", "dv_rtn")} for p in plans]
     with mp.get_context("spawn").Pool(workers, initializer=_init_worker,
-                                      initargs=(ctx["t0"].isoformat(), lean, sc.MAX_REL_SPEED_KM_S)) as pool:
+                                      initargs=(ctx["t0"].isoformat(), lean, sc.MAX_REL_SPEED_KM_S,
+                                                str(ctx.get("objects_path") or sc.OBJECTS_PATH))) as pool:
         raw = [hit for chunk in pool.imap_unordered(_screen_steps, pieces) for hit in chunk]
 
     # Keep the closest coarse hit per (plan, burn?, object, encounter) and refine it exactly.

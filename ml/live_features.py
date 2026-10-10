@@ -33,8 +33,8 @@ CONJUNCTIONS_PATH = ROOT / "app" / "data" / "conjunctions.json"
 class Catalogue:
     """The simulation's objects with their SGP4 records, looked up by NORAD ID."""
 
-    def __init__(self):
-        self.objs, self.sats = sc.load_objects()
+    def __init__(self, objects_path=None):
+        self.objs, self.sats = sc.load_objects(objects_path or sc.OBJECTS_PATH)
         self.index = {o["norad_id"]: k for k, o in enumerate(self.objs)}
 
     def sat(self, norad):
@@ -61,9 +61,9 @@ class Catalogue:
         return "PAYLOAD" if self.can_manoeuvre(norad) else "DEBRIS"
 
 
-def load_screening():
+def load_screening(path=CONJUNCTIONS_PATH):
     """The screener's app file as (metadata, list of event dicts), plus the window start (t0, jd0, fr0)."""
-    data = json.loads(CONJUNCTIONS_PATH.read_text())
+    data = json.loads(Path(path).read_text())
     events = [dict(zip(data["fields"], row)) for row in data["rows"]]
     t0 = datetime.fromisoformat(data["window_start_utc"].replace("Z", "+00:00"))
     jd0, fr0 = jday(t0.year, t0.month, t0.day, t0.hour, t0.minute, t0.second)
