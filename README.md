@@ -153,8 +153,13 @@ manoeuvre, so debris-debris events get no plan: they stay red zones (above).
   TCA is linear in the burn, so the cheapest burn that shifts the satellite to a given point of the encounter
   plane is the pseudo-inverse solution; the planner takes the cheapest of these over the edge of the unsafe
   region, for burn times from 0.1 to 2 orbits before TCA in steps of 0.05, and sizes it by bisection.
-- **Return:** one or two burns after the encounter put the satellite back on its original orbit (same
-  semi-major axis, no radial or cross-track offset), a few km ahead of or behind its original position.
+- **Return:** as soon as the satellite has passed the collision area (first return burn 1 minute after TCA),
+  one or two burns put it back on its original orbit within 0.1 orbit (about 10 minutes) of TCA: same
+  semi-major axis, no radial or cross-track offset, a few km ahead of or behind its original position. A fast
+  return costs only ~0.2-0.3 m/s more than drifting back over ~40 minutes. The last burn is trimmed with
+  full two-body dynamics so the restored orbit's semi-major axis is within a metre (a 10 m error would drift
+  ~2 km/day from the slot). The avoided object is re-checked along the return, so it cannot swing back
+  towards it.
 - **Safety:** the whole detour is checked against every object in its altitude band; a plan that creates a new
   approach under 2 km is dropped and the next cheapest is tried.
 - **Propellant:** rocket equation for an assumed 500 kg satellite with I<sub>sp</sub> 220 s (TLEs give neither).
@@ -326,3 +331,10 @@ Burns are larger than real ones (typically 1-10 cm/s) because Pc uses the screen
 covariance. The model was trained on ESA CDMs, which carry precise covariances; on TLE-derived inputs its
 probability is best read as a ranking. The ML ranking covers the screening produced by `run.sh`; windows screened
 on demand by the server are listed without it.
+
+## Second simulation: satellites that talk to each other
+
+`autonomy/` is a separate simulation in which satellites share their orbit data with neighbours within 50 km and
+avoid collisions on their own (no ground screening). Open it with the **"Satellite communication"** button in the
+main simulation (the main server also serves it at `/autonomy/`), or run it alone with `autonomy/run.sh`; see
+`autonomy/README.md`. Run `python3 autonomy/engine.py` once first to create its network run.
