@@ -10,10 +10,11 @@ A plan has three burns:
      Its offset at TCA is linear in the burn (CW), so for each burn time the cheapest burn that shifts the
      satellite to a given point of the encounter plane is the pseudo-inverse solution; the cheapest of
      these over the edge of the unsafe region is taken (see safe_shifts, cheapest_burn);
-  2. + 3. a two-impulse return after the encounter. return_mode="orbit" (default) ends with zero radial and
-     cross-track offset and zero relative velocity: the satellite is back on its original orbit, a constant
-     distance ahead of or behind its original position (chosen to minimise delta-v). return_mode="slot" also
-     removes that along-track offset (back in its original slot; costs more).
+  2. + 3. a return that starts as soon as the encounter is over (RETURN_DELAY_S after TCA) and puts the
+     satellite back on its original orbit within RETURN_WITHIN_PERIODS of TCA. return_mode="orbit" (default)
+     ends with zero radial and cross-track offset and zero relative velocity: back on the original orbit, a
+     constant distance ahead of or behind its original position (chosen to minimise delta-v).
+     return_mode="slot" also removes that along-track offset (back in its original slot; costs more).
 
 One candidate per burn time is built and they are tried cheapest first (total delta-v). The whole
 manoeuvred path is checked against every nearby object; a candidate that brings it closer than
@@ -24,6 +25,7 @@ bodies cannot manoeuvre. Propellant is the rocket equation for an assumed satell
 import math
 
 import numpy as np
+from scipy.integrate import solve_ivp
 from scipy.optimize import minimize_scalar
 from sgp4.api import SatrecArray
 
@@ -48,8 +50,13 @@ G0_M_S2 = 9.80665
 # Propellant is reported for this satellite: TLEs give neither mass nor engine, so both are assumptions.
 ASSUMED_MASS_KG = 500.0
 ASSUMED_ISP_S = 220.0           # hydrazine monopropellant thruster
-RETURN_START_PERIODS = 0.25                        # first return burn this long after TCA
-RETURN_TRANSFERS = [0.75, 1.25, 1.75, 2.25, 2.75]    # transfer time of the return, in orbits (longer = cheaper)
+# The return starts once the satellite has passed the collision area and must be complete soon after:
+RETURN_DELAY_S = 60.0           # first return burn this long after TCA (>= 6 km apart at the slowest 0.1 km/s)
+RETURN_START_WITHIN_PERIODS = 0.05  # ...and no later than this (~5 min): the return begins right after the encounter
+RETURN_WITHIN_PERIODS = 0.1     # back on the original orbit within this many orbits after TCA (~10 min in LEO);
+                                # measured: only ~0.2-0.3 m/s more than drifting back over ~40 min
+RETURN_TRANSFER_FRACTIONS = [0.4, 0.55, 0.7, 0.85, 1.0]  # two-impulse transfer lengths, as fractions of the time
+                                                          # left between the first return burn and the deadline
 PATH_STEP_S = 20.0
 MAX_SECONDARY_CHECKS = 6
 CLOSEST_LISTED = 3              # nearest other objects to the manoeuvred path that are reported
@@ -97,11 +104,12 @@ def cw_rr_rv(n, t):
 class Plan:
     """Burn schedule in the manoeuvring satellite's Hill frame; offset(t) gives its displacement.
 
-    Return options after the encounter (the cheapest valid one is kept):
-      * single burn exactly k orbits after the avoidance burn: the CW motion is then back on the original
-        orbit with the burn's velocity, so one opposite burn ends it (total = 2 x avoidance burn). For radial
-        and cross-track burns this is also back in the original slot; for along-track burns a constant
-        along-track offset remains;
+    Return options after the encounter; all start between RETURN_DELAY_S and RETURN_START_WITHIN_PERIODS
+    after TCA and end within RETURN_WITHIN_PERIODS of it, and the cheapest is kept:
+      * single burn exactly k orbits after the avoidance burn (when that falls in the window): the CW motion is
+        then back on the original orbit with the burn's velocity, so one opposite burn ends it (total = 2 x
+        avoidance burn). For radial and cross-track burns this is also back in the original slot; for
+        along-track burns a constant along-track offset remains;
       * two-impulse return (t2 -> t3) to the original orbit at the cheapest along-track position
         (return_mode "orbit") or exactly to the original slot ("slot").
     """
@@ -111,18 +119,25 @@ class Plan:
         start = np.r_[0.0, 0.0, 0.0, self.dv1]
         options = []
 
-        # Single burn k orbits after t1, the first such time at least 0.1 orbit after TCA.
-        k = max(1, math.ceil((tca + 0.1 * period - t1) / period))
+        deadline = tca + RETURN_WITHIN_PERIODS * period
+
+        # Single burn k orbits after t1, if that time falls right after the encounter.
+        k = max(1, math.ceil((tca + RETURN_DELAY_S - t1) / period))
         t2 = t1 + k * 2 * math.pi / n
         s2 = cw(start, n, t2 - t1)
-        if abs(s2[0]) < 1e-9 and abs(s2[2]) < 1e-9 and (return_mode == "orbit" or abs(s2[1]) < 1e-6):
+        if t2 <= tca + RETURN_DELAY_S + RETURN_START_WITHIN_PERIODS * period \
+                and abs(s2[0]) < 1e-9 and abs(s2[2]) < 1e-9 \
+                and (return_mode == "orbit" or abs(s2[1]) < 1e-6):
             options.append(([(t1, self.dv1, start), (t2, -s2[3:], np.r_[s2[:3], 0, 0, 0])], s2[1]))
 
-        # Two-impulse returns: first burn RETURN_START_PERIODS after TCA, transfer of several lengths.
-        t2 = tca + RETURN_START_PERIODS * period
+        # Two-impulse returns: first burn just after the encounter, transfers ending by the deadline. A transfer of
+        # half an orbit or a whole one cannot be solved (sin(n t) = 0 makes the CW matrix singular), so those are skipped.
+        t2 = tca + RETURN_DELAY_S
         s2 = cw(start, n, t2 - t1)
-        for transfer in RETURN_TRANSFERS:
-            t3 = t2 + transfer * period
+        transfers = [f * (deadline - t2) for f in RETURN_TRANSFER_FRACTIONS]
+        transfers = [t for t in transfers if t > 0 and abs(math.sin(n * t)) > 0.05] or [0.4 * period]
+        for transfer_s in transfers:
+            t3 = t2 + transfer_s
             rr, rv = cw_rr_rv(n, t3 - t2)
 
             def burns(y_end):
@@ -151,6 +166,45 @@ class Plan:
             return np.zeros(6)
         t0, _, state = max((b for b in self.burns if b[0] <= t), key=lambda b: b[0])
         return cw(state, self.n, t - t0)
+
+
+def two_body(state, seconds):
+    """Integrate two-body motion of [r, v] (km, km/s) for `seconds`."""
+    def f(_, y):
+        r = y[:3]
+        return np.r_[y[3:], -MU_KM3_S2 * r / np.linalg.norm(r) ** 3]
+    return solve_ivp(f, (0.0, seconds), state, method="DOP853", rtol=1e-11, atol=1e-9).y[:, -1]
+
+
+def semi_major_axis(r, v):
+    return 1.0 / (2.0 / np.linalg.norm(r) - (v @ v) / MU_KM3_S2)
+
+
+def trim_final_burn(sat, plan, iterations=2):
+    """Correct the last burn so the orbit after it has the original semi-major axis in full (nonlinear)
+    two-body dynamics, not only in the linear CW model.
+
+    Faster returns use larger burns, whose second-order effect leaves the semi-major axis metres off, and
+    the satellite would then drift away from its slot (~2 km/day for 10 m). The burns are flown numerically
+    next to an unburned copy and the last one is corrected along-track by -n * da / 2 (Gauss's equation).
+    """
+    r1, v1, _ = states([sat], [plan.t1 * 1000])
+    ref = np.r_[r1[0, 0], v1[0, 0]]
+    times = [b[0] for b in plan.burns]
+    for _ in range(iterations):
+        ref_t, man, last = ref.copy(), ref.copy(), plan.t1
+        for k, (t, dv, _) in enumerate(plan.burns):
+            if t > last:
+                ref_t, man = two_body(ref_t, t - last), two_body(man, t - last)
+                last = t
+            # Burns are given in the Hill frame of the reference (unmanoeuvred) orbit, as in the CW plan.
+            man = man + np.r_[0, 0, 0, rtn(ref_t[:3], ref_t[3:]) @ dv]
+        da = semi_major_axis(man[:3], man[3:]) - semi_major_axis(ref_t[:3], ref_t[3:])
+        t_last, dv_last, state_last = plan.burns[-1]
+        dv_last = dv_last + np.array([0.0, -plan.n * da / 2.0, 0.0])
+        plan.burns[-1] = (t_last, dv_last, state_last)
+    assert times == [b[0] for b in plan.burns]
+    return plan
 
 
 def encounter(r_m, v_m, r_o, v_o):
@@ -281,11 +335,12 @@ def plan_for(objs, sats, valid, i_m, i_o, tca_ms, not_before_ms, hbr_km, return_
             break
         if any(abs(lead - r["lead_orbits"]) < RECHECK_LEAD_GAP for r in rejected):
             continue
-        check = secondary_check(objs, sats, valid, i_m, plan, exclude=i_o)
+        check = secondary_check(objs, sats, valid, i_m, plan, exclude=i_o, partner_tca_s=tca_s)
         if check["new_conjunctions"]:
             rejected.append({"burn": f"{np.linalg.norm(plan.dv1) * 1000:.3f} m/s {direction_of(plan.dv1)[0]}",
                              "lead_orbits": lead, "creates": check["new_conjunctions"][:3]})
             continue
+        trim_final_burn(sat_m, plan)
         return {**base, "possible": True, **describe(plan, lead, miss, pc),
                 "tca_after_ms": int(round(new_tca_ms)), "secondary": check,
                 "rejected": rejected, "path": path_samples(sat_m, plan)}
@@ -306,11 +361,13 @@ def offsets_eci(sat, plan, times_s):
     return r[0], v[0], d_r, d_v
 
 
-def secondary_check(objs, sats, valid, i_m, plan, exclude=None):
+def secondary_check(objs, sats, valid, i_m, plan, exclude=None, partner_tca_s=None):
     """Closest approaches of the manoeuvred path (t1..t3) to every object whose altitude band overlaps it.
 
     "new_conjunctions" are the approaches the manoeuvre would cause; "closest" are the nearest objects
-    whatever their distance was before, shown as evidence of what the detour passes.
+    whatever their distance was before, shown as evidence of what the detour passes. The avoided object
+    (`exclude`) is checked too, except within RETURN_DELAY_S of the planned encounter at partner_tca_s,
+    so a quick return cannot swing back towards it.
     """
     times = np.arange(plan.t1, plan.t3 + PATH_STEP_S, PATH_STEP_S)
     r0, v0, d_r, d_v = offsets_eci(sats[i_m], plan, times)
@@ -332,13 +389,19 @@ def secondary_check(objs, sats, valid, i_m, plan, exclude=None):
             tau = np.clip(-np.einsum("ijk,ijk->ij", dr, dv) / dv2, -PATH_STEP_S / 2, PATH_STEP_S / 2)
             d = np.linalg.norm(dr + dv * tau[..., None], axis=2)
             d[bad] = np.inf
+            if exclude in sub:
+                j = sub.index(exclude)
+                if partner_tca_s is None:
+                    d[j] = np.inf
+                else:
+                    d[j, np.abs(times - partner_tca_s) <= RETURN_DELAY_S + PATH_STEP_S] = np.inf
             dmin = d.min(axis=1)
             if label == "new":
                 new_min, new_arg = dmin, d.argmin(axis=1)
             else:
                 old_min = dmin
         for j, k in enumerate(sub):
-            if new_min[j] < SECONDARY_MIN_KM and new_min[j] < old_min[j] - 0.05 and k != exclude:
+            if new_min[j] < SECONDARY_MIN_KM and new_min[j] < old_min[j] - 0.05:
                 found.append({"name": objs[k]["name"], "norad": objs[k]["norad_id"],
                               "min_km": round(float(new_min[j]), 3), "was_km": round(float(old_min[j]), 3),
                               "time_ms": int(t_ms[new_arg[j]])})
@@ -366,7 +429,9 @@ def propellant_kg(dv_km_s):
 
 def describe(plan, lead, miss, pc):
     key, name = direction_of(plan.dv1)
-    labels = ["Avoidance burn"] + (["Return burn"] if len(plan.burns) == 2 else ["Return burn 1", "Return burn 2"])
+    # A return burn under 1 mm/s changes nothing visible (the detour is already heading back): not listed.
+    shown = [plan.burns[0]] + [b for b in plan.burns[1:] if np.linalg.norm(b[1]) >= 1e-6]
+    labels = ["Avoidance burn"] + (["Return burn"] if len(shown) == 2 else ["Return burn 1", "Return burn 2"])
     return {
         "direction": key, "direction_name": name, "lead_orbits": lead,
         "total_dv_mps": round(plan.total_dv() * 1000, 4),
@@ -374,7 +439,7 @@ def describe(plan, lead, miss, pc):
         "assumed_mass_kg": ASSUMED_MASS_KG, "assumed_isp_s": ASSUMED_ISP_S,
         "burns": [{"label": label, "time_ms": int(round(t * 1000)),
                    "dv_rtn_mps": [round(float(x) * 1000, 4) for x in dv], "dv_mps": round(float(np.linalg.norm(dv)) * 1000, 4)}
-                  for (t, dv, _), label in zip(plan.burns, labels)],
+                  for (t, dv, _), label in zip(shown, labels)],
         "miss_after_km": round(miss, 4), "pc_after": float(f"{pc:.4g}"),
         "back_on_orbit_ms": int(round(plan.t3 * 1000)),
         # Along-track position on the original orbit afterwards: + ahead of, - behind the original slot.
