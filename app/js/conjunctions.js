@@ -10,6 +10,7 @@ import { createOrbitPath } from './orbitPath.js';
 import { toScene } from './orbit.js';
 import { DATASET, dataUrl, makeSatrec } from './data.js';
 import { canManoeuvre, createManeuverView } from './maneuverView.js';
+import { attachRisk, createBurnMarker, maneuverBoxHtml } from './riskAssessment.js';
 import { SCENE_UNITS_PER_KM } from './config.js';
 
 const sat = window.satellite;
@@ -50,9 +51,11 @@ const RISK_ORDER = { red: 0, yellow: 1, green: 2 };
 const DAY_MS = 86400000;
 const shortDate = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 
-export function createConjunctionView({ data: initialData, scene, camera, sats, state, setSpeed, onAnalyze, clockRange }) {
+export function createConjunctionView({ data: initialData, risk, scene, camera, sats, state, setSpeed, onAnalyze, clockRange }) {
   const satByNorad = new Map(sats.map((s) => [s.norad, s]));
-  let data = null, events = [], windowStartMs = 0, windowEndMs = 0, nDays = 0;
+  let data = null, events = [], windowStartMs = 0, windowEndMs = 0;
+  // ML risk ranking (ml/assess_conjunctions.py) of the events of the loaded window, if it covers them.
+  let mlEvents = 0;
   // Debris-debris red zones of the loaded window (debris_zones in src/screen_conjunctions.py).
   let zoneRadiusKm = 0, zoneEvents = [];
   const zoneGroup = new THREE.Group();
@@ -72,9 +75,9 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
       Object.assign(e, { idx, name_1: a.name, group_1: a.group, name_2: b.name, group_2: b.group,
         tca_utc: new Date(e.tca_ms).toISOString() });
     });
+    mlEvents = attachRisk(events, risk);
     windowStartMs = Date.parse(d.window_start_utc);
     windowEndMs = windowStartMs + d.window_hours * 3600000;
-    nDays = Math.ceil(d.window_hours / 24);
     setZones(d.debris_zones);
 
     const c = d.counts ?? {};
@@ -84,7 +87,8 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
       `${d.window_start_utc.slice(0, 16).replace('T', ' ')} UTC · ` +
       `${((c.red ?? 0) + (c.yellow ?? 0) + (c.green ?? 0)).toLocaleString()} approaches < ${d.screen_km} km ` +
       `(${(c.red ?? 0).toLocaleString()} critical, ${(c.yellow ?? 0).toLocaleString()} watch)`;
-    $('conjNote').textContent =
+    $('conjNote').textContent = (mlEvents ? `ML: ${risk.model.name} trained on ESA's Kelvins CDM data ranks the ` +
+      `conjunctions; YES = predicted to end with Pc ≥ ${risk.model.high_risk_pc.toExponential(0)}. ` : '') +
       `Pc uses an assumed covariance (TLEs have none) that grows with element age, and a ${d.hbr_m} m ` +
       `combined hard-body radius.` + (d.intra_max_age_days
         ? ` Same-constellation pairs (e.g. Starlink–Starlink) are only screened while both element sets are at most ` +
@@ -127,6 +131,12 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
 
   const filterEl = $('conjFilter'), sortEl = $('conjSort'), hideSameEl = $('conjHideSame'), listEl = $('conjList');
   const rangeEl = $('conjRange');
+  if (risk) {
+    filterEl.value = 'ml';
+    sortEl.value = 'ml';
+  } else {
+    for (const el of [filterEl, sortEl]) el.querySelector('option[value="ml"]')?.remove();
+  }
   for (const el of [filterEl, sortEl, hideSameEl, rangeEl]) el.onchange = () => { lastIds = ''; renderDays(); renderList(); };
 
   // A focused satellite (selected by the user) overrides the risk filter: all its events are listed.
@@ -135,6 +145,7 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
     if (focus) return involves(e, focus.norad);
     if (filterEl.value === 'debris') return satelliteVsDebris(e);
     if (filterEl.value === 'zones') return !!e.zone;
+    if (filterEl.value === 'ml') return e.ml_yes === true;
     return filterEl.value === 'red' ? e.risk === 'red' : e.risk !== 'green';
   };
 
@@ -146,7 +157,8 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
     const to = rangeEl.value === 'all' ? Infinity : state.simTime + Number(rangeEl.value) * 3600000;
     let list = events.filter((e) => e.tca_ms >= from && e.tca_ms <= to && passes(e));
     const key = sortEl.value;
-    if (key === 'pc') list.sort((a, b) => b.pc - a.pc);
+    if (key === 'ml') list.sort((a, b) => (a.ml_rank ?? Infinity) - (b.ml_rank ?? Infinity) || b.pc - a.pc);
+    else if (key === 'pc') list.sort((a, b) => b.pc - a.pc);
     else if (key === 'miss') list.sort((a, b) => a.miss_km - b.miss_km);
     else list.sort((a, b) => a.tca_ms - b.tca_ms);
     return list;
@@ -175,47 +187,123 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
       return;
     }
     lastIds = ids;
-    listEl.innerHTML = shown.map((e) => `
+    const ranked = sortEl.value === 'ml' && mlEvents > 0;
+    listEl.innerHTML = shown.map((e, pos) => `
       <div class="conj-row${active === e ? ' active' : ''}" data-idx="${e.idx}">
         <span class="badge ${e.risk}"></span>
-        <div class="conj-names">${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
+        <div class="conj-names">${ranked ? `<span class="conj-rank">${pos + 1}</span>` : ''}${escapeHtml(e.name_1)} × ${escapeHtml(e.name_2)}</div>
         <div class="conj-meta"><span class="when">in ${formatDuration(e.tca_ms - state.simTime)}</span>
-          · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}</div>
+          · ${e.miss_km.toFixed(3)} km · Pc ${formatPc(e.pc)}${mlTag(e)}</div>
         ${e.zone ? `<div class="conj-zone">Red zone · ${e.zone.count ? `${plural(e.zone.count, 'satellite')} exposed` : 'no satellites nearby'}</div>` : ''}
-      </div>`).join('') || `<div class="muted small">${covered(state.simTime) ? 'No events match.' : 'No screening for this time yet.'}</div>`;
+      </div>`).join('') || `<div class="muted small">${!covered(state.simTime) ? 'No screening for this time yet.'
+        : filterEl.value === 'ml' && !mlEvents ? 'No ML assessment for this window: run ml/assess_conjunctions.py on it, or pick another filter.'
+          : 'No events match.'}</div>`;
   }
+  // ML decision and probability for a list row (with a warning when no safe burn was found).
+  function mlTag(e) {
+    if (e.ml_prob == null) return '';
+    const warn = e.ml_yes && e.ml_plan?.status === 'warning' ? ' <span class="ml-warn">⚠ no safe burn</span>' : '';
+    return `<br><span class="ml-tag ${e.ml_yes ? 'yes' : 'no'}">ML ${e.ml_yes ? 'YES' : 'NO'} · ${e.ml_prob.toFixed(3)}</span>${warn}`;
+  }
+
   // ---------- events per day (click a day to fast-forward there) ----------
+  // Calendar days (UTC). For the live data the chart always shows today and the next 6 days by the real
+  // date, whatever window is loaded; days the loaded screening does not cover are greyed out. A history
+  // replay, or another week loaded on demand and being viewed, shows its own days instead.
   const daysEl = $('conjDays');
-  // Each bar covers 24 h from the screening start, so label it with its exact range.
+  const CHART_DAYS = 7;
+  const utcDay = (ms) => Math.floor(ms / DAY_MS) * DAY_MS;
   const stamp = (ms) => `${shortDate(ms)} ${new Date(ms).toISOString().slice(11, 16)}`;
-  const dayRange = (d) => `${stamp(windowStartMs + d * DAY_MS)} – ${stamp(Math.min(windowEndMs, windowStartMs + (d + 1) * DAY_MS))}`;
+  let chartStartMs = 0;
+  function chartStart() {
+    const today = utcDay(Date.now());
+    const overlapsWeek = windowStartMs < today + CHART_DAYS * DAY_MS && windowEndMs > today;
+    return !DATASET && (overlapsWeek || !covered(state.simTime)) ? today : utcDay(windowStartMs);
+  }
   function renderDays() {
-    const counts = new Array(nDays).fill(0);
+    chartStartMs = chartStart();
+    const today = utcDay(Date.now());
+    const counts = new Array(CHART_DAYS).fill(0);
     for (const e of events) {
-      const d = Math.floor((e.tca_ms - windowStartMs) / DAY_MS);
-      if (d >= 0 && d < nDays && passes(e)) counts[d]++;
+      const d = Math.floor((e.tca_ms - chartStartMs) / DAY_MS);
+      if (d >= 0 && d < CHART_DAYS && passes(e)) counts[d]++;
     }
     const max = Math.max(1, ...counts);
-    daysEl.innerHTML = counts.map((n, d) => `
-      <button class="day" data-day="${d}" title="${n.toLocaleString()} events · ${dayRange(d)} UTC">
-        <span class="count">${n.toLocaleString()}</span>
-        <span class="bar" style="height:${Math.max(2, Math.round((n / max) * 40))}px"></span>
-        <span class="label">${shortDate(windowStartMs + d * DAY_MS)}</span>
-      </button>`).join('');
+    daysEl.innerHTML = counts.map((n, d) => {
+      const from = chartStartMs + d * DAY_MS, to = from + DAY_MS;
+      const screened = data !== null && from < windowEndMs && to > windowStartMs;
+      const partial = screened && (from < windowStartMs || to > windowEndMs);
+      const title = !screened ? `${shortDate(from)}: not screened yet`
+        : `${n.toLocaleString()} events · ${stamp(Math.max(from, windowStartMs))} – ${stamp(Math.min(to, windowEndMs))} UTC` +
+          (partial ? ' (part of the day screened)' : '');
+      return `<button class="day${screened ? '' : ' unscreened'}${from === today ? ' today' : ''}" data-day="${d}" title="${title}">
+        <span class="count">${screened ? n.toLocaleString() : '–'}</span>
+        <span class="bar" style="height:${screened ? Math.max(2, Math.round((n / max) * 40)) : 2}px"></span>
+        <span class="label">${from === today ? 'Today' : shortDate(from)}</span>
+      </button>`;
+    }).join('');
     highlightDay();
   }
   function highlightDay() {
-    const current = Math.floor((state.simTime - windowStartMs) / DAY_MS);
+    const current = Math.floor((state.simTime - chartStartMs) / DAY_MS);
     for (const b of daysEl.children) b.classList.toggle('current', Number(b.dataset.day) === current);
   }
   daysEl.onclick = (ev) => {
     const b = ev.target.closest('.day');
     if (!b) return;
-    state.simTime = windowStartMs + Number(b.dataset.day) * DAY_MS;  // start of that day
+    // Start of that day; today starts now. A day outside the loaded window is screened on demand.
+    const dayStart = chartStartMs + Number(b.dataset.day) * DAY_MS;
+    state.simTime = dayStart === utcDay(Date.now()) ? Math.max(dayStart, Date.now()) : dayStart;
     rangeEl.value = '24';
     lastIds = '';
+    renderDays();
     renderList();
   };
+
+  // ---------- freshness of the live data (daily update by src/server.py) ----------
+  // The live screening should start today. The server refreshes it daily (src/daily_update.py); the page
+  // shows its progress and offers to reload when a new screening is ready.
+  const liveStart = initialData && !DATASET ? initialData.window_start_utc : null;
+  const freshEl = $('conjFresh');
+  const fmtDay = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  let lastDay = utcDay(Date.now()), statusApi = true;
+  async function checkFreshness() {
+    if (utcDay(Date.now()) !== lastDay) {    // midnight UTC passed: the chart moves on by a day
+      lastDay = utcDay(Date.now());
+      renderDays();
+    }
+    if (!liveStart) return;
+    const today = utcDay(Date.now());
+    const week = `${fmtDay(today)} – ${fmtDay(today + (CHART_DAYS - 1) * DAY_MS)}`;
+    let s = null;
+    if (statusApi) {
+      try {
+        const res = await fetch('api/status');
+        if (res.ok) s = await res.json(); else statusApi = false;
+      } catch { statusApi = false; }
+    }
+    const loadedCurrent = utcDay(Date.parse(liveStart)) === today;
+    if (s && s.window_start_utc && s.window_start_utc !== liveStart && s.current) {
+      freshEl.className = 'fresh ready';
+      freshEl.innerHTML = `✓ New 7-day screening ready (${week}). <button id="freshReload">Reload</button>`;
+    } else if (loadedCurrent) {
+      freshEl.className = '';
+      freshEl.innerHTML = '';
+    } else if (s?.updating) {
+      freshEl.className = 'fresh';
+      freshEl.innerHTML = `<span class="spinner"></span>Updating to today's 7 days (${week}): new orbital data, ` +
+        `screening and ML ranking, about 15-25 min. The page offers to reload when it is done.`;
+    } else {
+      freshEl.className = 'fresh warn';
+      freshEl.innerHTML = `This screening starts ${fmtDay(Date.parse(liveStart))}, not today (${fmtDay(today)}). ` +
+        (s?.error ? `${escapeHtml(s.error)}.`
+          : s ? 'The server will refresh it shortly.'
+            : 'Run <code>python src/daily_update.py</code> (or <code>./run.sh</code>) to refresh it.');
+    }
+  }
+  freshEl.addEventListener('click', (ev) => { if (ev.target.closest('#freshReload')) location.reload(); });
+  checkFreshness();
+  setInterval(checkFreshness, 60000);
 
   // Restrict the list to one satellite and show its debris check in the satellite card.
   function setFocus(s) {
@@ -330,6 +418,34 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
   });
   $('conjManeuver').onclick = () => { if (active) maneuver.request(active); };
 
+  // Compact burn box (riskAssessment.js): the server's plan when there is one, else the ML pipeline's.
+  const burnMarker = createBurnMarker(scene);
+  let lastBox = '', markerFor = null;
+  function renderBurnBox() {
+    const e = active;
+    const { plan, done } = maneuver.planFor(e);
+    const html = maneuverBoxHtml(e, { serverPlan: plan, serverDone: done, simTime: Math.floor(state.simTime / 1000) * 1000, risk });
+    if (html !== lastBox) { $('conjMlPlan').innerHTML = html; lastBox = html; }
+    // The server's plan draws its own burns; the precomputed burn gets a marker of its own.
+    const ml = !done && e.ml_yes && e.ml_plan?.status === 'ok' ? e.ml_plan : null;
+    if (ml && markerFor !== e) {
+      burnMarker.show(ml.maneuver_norad === e.norad_1 ? recA : recB, ml);
+      markerFor = e;
+    } else if (!ml && markerFor) {
+      burnMarker.hide();
+      markerFor = null;
+    }
+  }
+  // The box is redrawn every second, so act on pointerdown rather than click.
+  $('conjMlPlan').addEventListener('pointerdown', (ev) => {
+    const m = active?.ml_plan;
+    if (!ev.target.closest('#manGo') || m?.status !== 'ok') return;
+    state.simTime = m.burn_ms - 60000;   // a minute before the burn, then run at 10x
+    setSpeed(10);
+    const p = burnMarker.position;
+    camera.position.copy(p.clone().normalize().multiplyScalar(p.length() + 4.5));
+  });
+
   // Red zones: a translucent sphere at the collision point, from an hour before TCA until one orbit after.
   const zoneGeometry = new THREE.SphereGeometry(1, 32, 20);   // scaled to the zone radius per mesh
   function zoneMesh(e) {   // built the first time the zone is shown; null if SGP4 fails
@@ -410,6 +526,10 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
   function close() {
     maneuver.clear();
     active = null;
+    burnMarker.hide();
+    markerFor = null;
+    lastBox = '';
+    $('conjMlPlan').innerHTML = '';
     group.visible = false;
     orbitA.hide();
     orbitB.hide();
@@ -529,6 +649,10 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
       ['Altitude', `${e.altitude_km.toFixed(0)} km`],
       ['Collision probability', formatPc(e.pc)],
     ];
+    if (e.ml_prob != null) {
+      rows.push(['ML risk probability', `<b>${e.ml_prob.toFixed(3)}</b> (rank ${e.ml_rank.toLocaleString()} of ${risk.counts.events.toLocaleString()})`],
+        ['ML decision', `<span class="badge-text ${e.ml_yes ? 'red' : 'green'}">${e.ml_yes ? 'YES · high risk' : 'NO'}</span>`]);
+    }
     const plan = maneuver.summary();
     if (plan) {
       rows.splice(3, 0, ['With manoeuvre', `<b>${(plan.miss_after_km * 1000).toFixed(0)} m</b> miss · Pc ${formatPc(plan.pc_after)}`]);
@@ -536,6 +660,7 @@ export function createConjunctionView({ data: initialData, scene, camera, sats, 
       rows.splice(1, 0, ['Avoidance', '<span class="badge-text red">no safe manoeuvre</span>']);
     }
     $('conjDetailBody').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+    renderBurnBox();
   }
 
   // Analyse the screened pass of two objects closest to nearMs (used by the replay's "Go to collision").

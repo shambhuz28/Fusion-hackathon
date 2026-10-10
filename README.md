@@ -216,6 +216,28 @@ when the clock leaves the screened window (date picker, +1 day/week, playback), 
 If port 8765 is busy, the next free port is used. The Python scripts also work with plain `python3`
 (they re-run themselves with `.venv/bin/python`, see `src/_venv.py`).
 
+### Daily update: always today and the next 6 days
+
+The live data always covers **today 00:00 UTC to 7 days ahead**, and the "Events per day" chart shows today and
+the next 6 calendar days by the real date. `src/daily_update.py` downloads fresh elements from CelesTrak
+(cached downloads, or the current elements, when CelesTrak refuses), exports them, screens 7 days from today
+00:00 UTC and runs the ML ranking (`ml/`, when set up). It builds everything in `app/data/staging/` and moves the
+files into `app/data/` only when all steps have succeeded (~15 min on 16 cores).
+
+`src/server.py` runs it by itself: at start-up and every 15 minutes it checks whether the live screening starts
+today, and if not (e.g. after midnight UTC) updates it in the background (`GET /api/status` reports progress).
+An open page shows "Updating to today's 7 days…" and then "New 7-day screening ready · Reload". Without the
+server, the panel says when the screening is not from today; run the update by hand:
+
+```bash
+python src/daily_update.py            # nothing to do if the screening already starts today
+python src/daily_update.py --force    # rebuild anyway (--no-download, --no-ml, --days N)
+python src/server.py --no-daily-update   # serve without the automatic refresh
+```
+
+Days the loaded screening does not cover are drawn grey ("not screened yet"); a history replay, or another week
+screened on demand and being viewed, shows its own days.
+
 ### Validity of the orbital data
 
 SGP4 elements are only meaningful near their epoch. Each object is shown and screened only within
@@ -263,3 +285,44 @@ and event counts, refinement time), and CPU and memory are recorded while it run
 ```
 
 Without the `logfire` package or without credentials the scripts run exactly as before and send nothing.
+
+## ML risk ranking and precomputed avoidance (`ml/`)
+
+An XGBoost classifier trained on ESA's Kelvins Collision Avoidance Challenge data (real CDMs, `ml/train.py`)
+ranks the screened conjunctions. It runs in its own environment, `ml/.venv` (see `ml/requirements.txt`).
+
+```bash
+ml/.venv/Scripts/python ml/assess_conjunctions.py   # ~10 min: scores app/data/conjunctions.json, writes app/data/risk_assessment.json
+ml/.venv/Scripts/python ml/verify_maneuvers.py      # ~8 min, 3 checks of the precomputed burns
+ml/.venv/Scripts/python ml/predict.py --evaluate    # the model on ESA's held-out test events
+```
+
+1. Every screened conjunction becomes a Kelvins-style CDM row (`ml/live_features.py`) and gets an ML risk
+   probability and a YES/NO decision (YES = predicted to end with Pc >= 1e-6). The conjunction panel opens on
+   "ML: predicted collision (YES)", sorted and numbered by that probability; the analysis card shows the
+   probability, rank and decision.
+2. For every YES conjunction, `ml/avoidance.py` precomputes the smallest single burn (Clohessy-Wiltshire,
+   burn times up to 3 orbits before TCA, 2,000 directions, +5 % margin) that brings Pc below 1e-6, and screens
+   the new path against every object until 2 orbits after TCA. A burn that creates or worsens an approach with
+   Pc >= 1e-6 is rejected and up to 4 alternatives are tried. If none is safe, the burn would exceed 1 m/s, TCA
+   is less than 15 min away, or neither object can manoeuvre, the conjunction is marked **⚠ no safe burn**
+   (COLLISION WARNING).
+3. **Burn box** at the top of the analysis card: an arrow and the Δv magnitude with its direction as seen from
+   the satellite facing its direction of travel (forward/back, left/right, up/down). It shows the first burn of
+   the detailed plan from `src/server.py` (above) when there is one, and the precomputed burn otherwise
+   (e.g. when the app is served without the server), with burn time, components, miss and Pc before/after,
+   and **Go to burn**.
+
+Last run (38,854 conjunctions of the 7-day screening): 5,515 YES; 3,347 burns planned (median 22 cm/s),
+38 not needed, 2,130 warnings (1,540 where neither object can manoeuvre, 486 where every burn found approaches
+another object, 77 needing more than 1 m/s, 27 less than 15 min before TCA). Verification on 200 burns: the CW
+displacement differs from two-body + J2 propagation by 0.20 % (median) and Pc stays below 1e-6 under J2 for 98 %
+(worst 3.7e-6); a burn 10 % smaller is not enough for 199 of 200; brute-force 2 s screening of 4 burns against
+all 18,550 objects found no missed interference. The model itself: XGBoost, chosen over logistic regression, random
+forest, HistGradientBoosting and LightGBM by grouped cross-validation; on ESA's held-out test events it finds 77 %
+of the high-risk events (F2 0.741, the same as the latest-Pc baseline's 0.753 within noise).
+
+Burns are larger than real ones (typically 1-10 cm/s) because Pc uses the screener's assumed, km-sized TLE
+covariance. The model was trained on ESA CDMs, which carry precise covariances; on TLE-derived inputs its
+probability is best read as a ranking. The ML ranking covers the screening produced by `run.sh`; windows screened
+on demand by the server are listed without it.

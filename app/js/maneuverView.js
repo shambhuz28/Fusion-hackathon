@@ -103,7 +103,8 @@ export function createManeuverView({ scene, state, satByNorad, onPlanChange, not
   let result = null;       // server response
   let selected = 0;        // index into result.plans
   let requestId = 0;
-  let failure = null;      // why planning failed (no server, bad request)
+  let failure = null;      // why planning failed (bad request, server error)
+  let offline = false;     // served without src/server.py: no plans, nothing to show over the simulation
   const hud = $('planHud');
   let hudHtml = '', lastHud = 0;
 
@@ -182,7 +183,7 @@ export function createManeuverView({ scene, state, satByNorad, onPlanChange, not
 
   // ---------- suggestion over the simulation ----------
   function hudContent() {
-    if (!event) return ['', ''];
+    if (!event || offline) return ['', ''];
     if (failure) return ['red', `<div class="title">Avoidance manoeuvre: planning failed</div>${escapeHtml(failure)}`];
     if (!result) return ['', '<span class="spinner"></span>Planning an avoidance manoeuvre and checking it against nearby objects…'];
     if (result.plans.length && result.plans.every((q) => q.not_needed)) {
@@ -322,7 +323,7 @@ export function createManeuverView({ scene, state, satByNorad, onPlanChange, not
       const res = await fetch(`api/maneuver?n1=${e.norad_1}&n2=${e.norad_2}&tca_ms=${e.tca_ms}` +
         `&not_before_ms=${Math.round(notBefore())}` + (DATASET ? `&dataset=${encodeURIComponent(DATASET)}` : ''));
       if (id !== requestId) return;
-      if (res.status === 404) throw new Error('Start the app with ./run.sh (src/server.py) to plan manoeuvres.');
+      if (res.status === 404) throw Object.assign(new Error('no server'), { noServer: true });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       result = body;
@@ -333,6 +334,13 @@ export function createManeuverView({ scene, state, satByNorad, onPlanChange, not
       if (rewind) replay();
     } catch (err) {
       if (id !== requestId) return;
+      if (err.noServer) {   // served without src/server.py: a quiet note, not an error
+        offline = true;
+        renderHud();
+        planEl().innerHTML = '<div class="muted small">Detailed plans with return burns need the simulation server ' +
+          '(<code>./run.sh</code> or <code>python src/server.py</code>).</div>';
+        return;
+      }
       failure = err.message;
       renderHud();
       planEl().innerHTML = `<div class="check yellow"><div class="title">Planning failed</div>${escapeHtml(err.message)}</div>`;
@@ -351,6 +359,9 @@ export function createManeuverView({ scene, state, satByNorad, onPlanChange, not
     request, clear, offset, drawnOffset, update,
     forEvent: (e) => e === event,
     summary: () => (plan()?.possible && flying() ? plan() : null),
+    // For the compact burn box (riskAssessment.js): the selected possible plan, and whether the server
+    // has answered for e (a failed request, e.g. no server, counts as no answer).
+    planFor: (e) => (e === event ? { plan: plan()?.possible ? plan() : null, done: !!result } : { plan: null, done: false }),
     warning: () => (result && !result.possible),
   };
 }
