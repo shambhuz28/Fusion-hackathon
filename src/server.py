@@ -304,14 +304,14 @@ class Handler(SimpleHTTPRequestHandler):
             super().log_message(fmt, *args)
 
 
-def bind(port, tries=20):
+def bind(port, host="127.0.0.1", tries=20):
     """First free port from `port` upwards (e.g. when the simulation is already running)."""
     for candidate in range(port, port + tries):
         try:
             with socket.socket() as s:
                 # Same option the HTTP server uses: a port left in TIME_WAIT by a just-stopped server is free.
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("127.0.0.1", candidate))
+                s.bind((host, candidate))
             return candidate
         except OSError:
             continue
@@ -321,6 +321,8 @@ def bind(port, tries=20):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
+                        help="address to listen on (0.0.0.0 inside a container; default 127.0.0.1)")
     parser.add_argument("--workers", type=int, default=min(6, os.cpu_count() or 1))
     parser.add_argument("--no-daily-update", action="store_true",
                         help="do not refresh the live data when its screening does not start today")
@@ -328,14 +330,14 @@ def main():
 
     if not sc.OBJECTS_PATH.exists():
         raise SystemExit(f"{sc.OBJECTS_PATH.relative_to(ROOT)} is missing; run ./run.sh first.")
-    port = bind(args.port)
+    port = bind(args.port, args.host)
     if port != args.port:
         print(f"Port {args.port} is already in use (is the simulation already running there?); using {port}.")
     telemetry.configure("simulation-server", system_metrics=True)
     Handler.screener = Screener(args.workers)
     Handler.updater = None if args.no_daily_update else DailyUpdater()
-    server = ThreadingHTTPServer(("127.0.0.1", port), partial(Handler, directory=str(APP_DIR)))
-    print(f"Simulation running at http://127.0.0.1:{port} (Ctrl+C to stop)", flush=True)
+    server = ThreadingHTTPServer((args.host, port), partial(Handler, directory=str(APP_DIR)))
+    print(f"Simulation running at http://{args.host}:{port} (Ctrl+C to stop)", flush=True)
     # Treat `kill` like Ctrl+C so the screening workers are always shut down with the server.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
     try:

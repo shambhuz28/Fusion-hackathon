@@ -1,0 +1,10 @@
+.git
+.venv
+ml/.venv
+.logfire
+**/__pycache__
+data/raw
+data/cache
+data/history
+data/staging
+app/data/staging
